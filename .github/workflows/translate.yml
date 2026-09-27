@@ -29,17 +29,20 @@ jobs:
       - run: npm run translate -- --tag --quiet
         env:
           READWISE_TOKEN: ${{ secrets.READWISE_TOKEN }}
-          PROVIDER: openai-compatible
-          LLM_BASE_URL: https://generativelanguage.googleapis.com/v1beta/openai
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          # Configurables sin tocar código: Settings → Secrets and variables → Actions → Variables.
-          # Si no existe la variable, se usa el default de la derecha.
+          # Todo lo de abajo se configura sin tocar código desde
+          # Settings → Secrets and variables → Actions → Variables.
+          # Si la variable no existe, se usa el default de la derecha (Gemini).
+          PROVIDER: ${{ vars.PROVIDER || 'openai-compatible' }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai' }}
           LLM_MODEL: ${{ vars.LLM_MODEL || 'gemini-flash-latest' }}
-          # Gemini 3 siempre razona; "low" lo minimiza y suma margen de tokens para que no se corte.
+          # Modelos que razonan (Gemini 3, gpt-oss): "low" lo minimiza y suma margen de tokens.
           LLM_REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'low' }}
           # Free tier: de a un chunk, con margen bajo el límite de RPM (menos 429/503).
-          CONCURRENCY: "1"
-          REQUESTS_PER_MINUTE: "5"
+          CONCURRENCY: ${{ vars.CONCURRENCY || '1' }}
+          REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE || '5' }}
+          # Proveedores con límite de tokens por minuto bajo (ej. Groq: 8K TPM) necesitan chunks chicos.
+          CHUNK_CHARS: ${{ vars.CHUNK_CHARS || '12000' }}
           TARGET_LANG: es
           # Borra el original y deja un link a la fuente en la traducción.
           # Si el original tiene highlights o nota (o algo no cierra), lo archiva en vez de borrarlo.
