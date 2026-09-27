@@ -37,6 +37,11 @@ export interface TranslateResult {
   failedChunks: number[];
   /** Hubo fallas y todas fueron pasajeras (red/cuota), no respuestas inválidas del modelo. */
   onlyTransientFailures: boolean;
+  /**
+   * Respuestas del modelo rechazadas por la validación (o fallidas por red) a lo largo
+   * de todo el documento, se hayan corregido al reintentar o no.
+   */
+  rejectedResponses: number;
 }
 
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -149,6 +154,8 @@ export async function translateChunk(
   maxAttempts: number,
   limiter: RateLimiter,
   depth = 0,
+  /** Contador compartido de respuestas rechazadas (para el resumen del artículo). */
+  stats: { rejected: number } = { rejected: 0 },
 ): Promise<ChunkResult> {
   let lastProblem: string | undefined;
   let transient = false;
@@ -161,7 +168,7 @@ export async function translateChunk(
       const res = await provider.complete({ system, user, maxTokens: estimateMaxTokens(chunk.html) });
       // Reintentar lo mismo cuando se corta por tokens es tirar cuota: se parte en mitades.
       if (res.truncated && depth < MAX_SPLIT_DEPTH) {
-        const split = await translateSplit(provider, chunk, system, maxAttempts, limiter, depth);
+        const split = await translateSplit(provider, chunk, system, maxAttempts, limiter, depth, stats);
         if (split) return split;
       }
       const check = validateTranslation(chunk, res.text, res.truncated);
@@ -177,6 +184,7 @@ export async function translateChunk(
     // "chunk" y no "intento" a secas: estos reintentos son dentro de la corrida y no
     // tienen nada que ver con los intentos del artículo (translate-attempt-N).
     const next = attempt < maxAttempts ? "se reintenta" : "se da por fallido";
+    stats.rejected++;
     console.warn(`  chunk rechazado (${attempt}/${maxAttempts}, ${next}): ${lastProblem}`);
   }
   return { html: chunk.html, ok: false, lastProblem, transient };
@@ -195,6 +203,7 @@ async function translateSplit(
   maxAttempts: number,
   limiter: RateLimiter,
   depth: number,
+  stats: { rejected: number },
 ): Promise<ChunkResult | null> {
   if (chunk.html.length < MIN_SPLIT_CHARS * 2) return null;
   const { chunks: parts, kept } = chunkHtml(chunk.html, Math.floor(chunk.html.length / 2));
@@ -205,7 +214,7 @@ async function translateSplit(
   console.warn(`  respuesta cortada por tokens: el chunk se parte en ${parts.length}`);
   const out: string[] = [];
   for (const part of parts) {
-    const r = await translateChunk(provider, part, system, maxAttempts, limiter, depth + 1);
+    const r = await translateChunk(provider, part, system, maxAttempts, limiter, depth + 1, stats);
     if (!r.ok) return { html: chunk.html, ok: false, lastProblem: r.lastProblem, transient: r.transient };
     out.push(r.html);
   }
@@ -230,10 +239,11 @@ export async function translateHtml(
   let done = 0;
   const failed: number[] = [];
   let permanentFailure = false;
+  const stats = { rejected: 0 };
 
   const results = await mapWithConcurrency(chunks, opts.concurrency, async (chunk, i) => {
     if (isPlaceholderOnly(chunk.html)) return chunk.html;
-    const r = await translateChunk(provider, chunk, system, maxAttempts, limiter);
+    const r = await translateChunk(provider, chunk, system, maxAttempts, limiter, 0, stats);
     if (!r.ok) {
       failed.push(i);
       if (!r.transient) permanentFailure = true;
@@ -249,6 +259,7 @@ export async function translateHtml(
     failedChunks: failed.sort((a, b) => a - b),
     // Si falló algo y TODO lo que falló fue por la request, vale la pena reintentar después.
     onlyTransientFailures: failed.length > 0 && !permanentFailure,
+    rejectedResponses: stats.rejected,
   };
 }
 

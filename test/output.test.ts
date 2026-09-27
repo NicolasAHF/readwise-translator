@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { docLabel, exitCodeFor, githubAnnotation, originalLabel, savedLabel, summaryLine } from "../src/output.js";
+import { completenessLabel, docLabel, exitCodeFor, githubAnnotation, originalLabel, savedLabel, summaryLine } from "../src/output.js";
 import { SkipError, translateDocument } from "../src/pipeline.js";
 import type { ReaderDocument } from "../src/readwise.js";
 import { FakeProvider } from "./fixtures.js";
@@ -9,12 +9,17 @@ const SECRET_URL = "https://read.readwise.io/new/read/nuevo123";
 
 describe("--quiet no filtra qué estás leyendo", () => {
   const doc = { id: "01abc", title: SECRET_TITLE };
-  const result = { title: `[ES] ${SECRET_TITLE}`, saved: { id: "nuevo123", url: SECRET_URL, alreadyExisted: false } };
+  const result = {
+    title: `[ES] ${SECRET_TITLE}`,
+    saved: { id: "nuevo123", url: SECRET_URL, alreadyExisted: false },
+    translatedChunks: 11,
+    rejectedResponses: 2,
+  };
 
   it("en quiet solo muestra ids", () => {
     expect(docLabel(doc, true)).toBe("doc 01abc");
     const saved = savedLabel(result, true);
-    expect(saved).toBe("→ nuevo123 [creado]");
+    expect(saved).toBe("traducción completa (11/11 chunks; 2 respuesta(s) rechazada(s) y corregida(s) al reintentar) → nuevo123 [creado]");
     expect(saved).not.toContain(SECRET_TITLE);
     expect(saved).not.toContain("https://");
   });
@@ -82,5 +87,14 @@ describe("githubAnnotation", () => {
     const env = { GITHUB_ACTIONS: "true" };
     expect(githubAnnotation("warning", "cuota agotada", env)).toBe("::warning::cuota agotada");
     expect(githubAnnotation("error", "100% roto\r\nlínea 2", env)).toBe("::error::100%25 roto%0D%0Alínea 2");
+  });
+});
+
+describe("completenessLabel", () => {
+  it("siempre afirma que la traducción está completa", () => {
+    expect(completenessLabel({ translatedChunks: 4, rejectedResponses: 0 })).toBe("traducción completa (4/4 chunks)");
+    expect(completenessLabel({ translatedChunks: 1, rejectedResponses: 1 })).toBe(
+      "traducción completa (1/1 chunks; 1 respuesta(s) rechazada(s) y corregida(s) al reintentar)",
+    );
   });
 });

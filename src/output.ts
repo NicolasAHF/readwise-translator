@@ -65,9 +65,24 @@ export function originalLabel(outcome: OriginalOutcome | undefined): string {
   }
 }
 
-export function savedLabel(result: Pick<PipelineResult, "title" | "saved">, quiet: boolean): string {
+/**
+ * Una traducción solo se guarda si está completa, así que el ✓ siempre lo dice
+ * explícitamente, junto con cuántas respuestas hubo que corregir en el camino:
+ * los "chunk rechazado" del log no dejan dudas de cómo terminaron.
+ */
+export function completenessLabel(result: Pick<PipelineResult, "translatedChunks" | "rejectedResponses">): string {
+  const n = result.translatedChunks;
+  const fixed = result.rejectedResponses
+    ? `; ${result.rejectedResponses} respuesta(s) rechazada(s) y corregida(s) al reintentar`
+    : "";
+  return `traducción completa (${n}/${n} chunks${fixed})`;
+}
+
+export function savedLabel(
+  result: Pick<PipelineResult, "title" | "saved" | "translatedChunks" | "rejectedResponses">,
+  quiet: boolean,
+): string {
   const how = result.saved?.alreadyExisted ? "ya existía" : "creado";
-  return quiet
-    ? `→ ${result.saved?.id ?? "?"} [${how}]`
-    : `${result.title} → ${result.saved?.url} [${how}]`;
+  const target = quiet ? `${result.saved?.id ?? "?"} [${how}]` : `${result.title} → ${result.saved?.url} [${how}]`;
+  return `${completenessLabel(result)} → ${target}`;
 }

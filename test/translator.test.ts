@@ -448,3 +448,26 @@ describe("describePlaceholderDiff: solo lo que cambió", () => {
     }
   });
 });
+
+describe("rejectedResponses", () => {
+  it("cuenta las respuestas rechazadas aunque después se corrijan", async () => {
+    // Cada chunk: la primera respuesta viene vacía, la segunda bien.
+    const seen = new Set<string>();
+    const provider = new FakeProvider((req) => {
+      const input = stripRetryNote(req.user);
+      if (!seen.has(input)) {
+        seen.add(input);
+        return { text: "", truncated: false };
+      }
+      return { text: fakeTranslate(input), truncated: false };
+    });
+    const res = await translateHtml(provider, ARTICLE, { ...opts, concurrency: 1 });
+    expect(res.failedChunks).toEqual([]);
+    expect(res.rejectedResponses).toBe(res.translatedChunks);
+  });
+
+  it("cero cuando todo sale al primer intento", async () => {
+    const res = await translateHtml(new FakeProvider(), ARTICLE, opts);
+    expect(res.rejectedResponses).toBe(0);
+  });
+});

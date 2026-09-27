@@ -90,6 +90,12 @@ describe("translateDocument — guardado", () => {
     expect(res.totalRequests).toBe(1);
   });
 
+  it("el resultado informa chunks traducidos y respuestas corregidas", async () => {
+    const res = await translateDocument(baseDoc, fakeReader(), new FakeProvider(), opts);
+    expect(res.translatedChunks).toBe(res.totalRequests - 1);
+    expect(res.rejectedResponses).toBe(0);
+  });
+
   it("totalRequests cuenta chunks del cuerpo + 1 de metadatos", async () => {
     const provider = new FakeProvider();
     const res = await translateDocument(baseDoc, fakeReader(), provider, opts);

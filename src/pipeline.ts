@@ -34,6 +34,10 @@ export interface PipelineResult {
   title: string;
   html: string;
   failedChunks: number;
+  /** Chunks del cuerpo que fueron al modelo. */
+  translatedChunks: number;
+  /** Respuestas rechazadas por la validación y corregidas (o no) al reintentar. */
+  rejectedResponses: number;
   totalRequests: number;
   saved?: { id: string; url: string; alreadyExisted: boolean };
   original?: OriginalOutcome;
@@ -116,6 +120,8 @@ export async function translateDocument(
     // El link al original va arriba y fuera de lo que ve el LLM (no se "traduce" ni se rompe).
     html: sourceHeader(doc, lang) + body.html,
     failedChunks: body.failedChunks.length,
+    translatedChunks: body.translatedChunks,
+    rejectedResponses: body.rejectedResponses,
     totalRequests: body.translatedChunks + (meta.usedRequest ? 1 : 0),
   };
   if (opts.dryRun) return result;
