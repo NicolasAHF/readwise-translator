@@ -15,16 +15,25 @@ concurrency:
   group: translate-reader
   cancel-in-progress: false
 
+# Mínimo privilegio: el job solo lee el código; todo lo demás va por las APIs con secrets propios.
+permissions:
+  contents: read
+
 jobs:
   translate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions fijadas por SHA de commit (un tag se puede mover; un SHA no).
+      # Dependabot (.github/dependabot.yml) abre PRs cuando salen versiones nuevas.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 22
-          cache: npm
+          persist-credentials: false # no hacemos push: el token de git no queda en disco
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          # Sin cache: npm ci tarda ~3s y así ningún cache compartido toca un job con secrets.
+          package-manager-cache: false
       - run: npm ci
       - run: npm run translate -- --tag --quiet
         env:
