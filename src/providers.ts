@@ -1,0 +1,131 @@
+/**
+ * Adapters de LLM detrás de una interfaz mínima (Strategy).
+ * El traductor no sabe con quién habla; agregar un proveedor es implementar `complete`.
+ *
+ *  - AnthropicProvider: Claude vía SDK oficial.
+ *  - OpenAICompatibleProvider: cualquier endpoint /chat/completions —
+ *    Gemini (AI Studio), Groq, Cerebras, OpenRouter, Ollama, LM Studio…
+ */
+import Anthropic from "@anthropic-ai/sdk";
+import type { Config } from "./config.js";
+
+export interface CompletionRequest {
+  system: string;
+  user: string;
+  maxTokens: number;
+}
+
+export interface CompletionResult {
+  text: string;
+  /** El modelo cortó por límite de tokens: la salida está incompleta. */
+  truncated: boolean;
+}
+
+export interface LlmProvider {
+  readonly name: string;
+  complete(req: CompletionRequest): Promise<CompletionResult>;
+}
+
+export class ProviderError extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+    this.name = "ProviderError";
+  }
+}
+
+export function createProvider(config: Config["provider"]): LlmProvider {
+  return config.kind === "anthropic"
+    ? new AnthropicProvider(config.apiKey, config.model)
+    : new OpenAICompatibleProvider(config.baseUrl, config.apiKey, config.model);
+}
+
+export class AnthropicProvider implements LlmProvider {
+  readonly name: string;
+  private readonly client: Anthropic;
+
+  constructor(apiKey: string, private readonly model: string) {
+    this.name = `anthropic/${model}`;
+    // El SDK ya reintenta 429/5xx con backoff.
+    this.client = new Anthropic({ apiKey, maxRetries: 5 });
+  }
+
+  async complete({ system, user, maxTokens }: CompletionRequest): Promise<CompletionResult> {
+    const msg = await this.client.messages.create({
+      model: this.model,
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: "user", content: user }],
+    });
+    const text = msg.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+    return { text, truncated: msg.stop_reason === "max_tokens" };
+  }
+}
+
+interface ChatCompletionResponse {
+  choices?: { message?: { content?: string | null }; finish_reason?: string }[];
+  error?: { message?: string };
+}
+
+export class OpenAICompatibleProvider implements LlmProvider {
+  readonly name: string;
+  private static readonly MAX_RETRIES = 5;
+
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiKey: string,
+    private readonly model: string,
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {
+    this.name = `${new URL(baseUrl).host}/${model}`;
+  }
+
+  async complete({ system, user, maxTokens }: CompletionRequest): Promise<CompletionResult> {
+    for (let attempt = 0; ; attempt++) {
+      const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: this.model,
+          max_tokens: maxTokens,
+          temperature: 0.2,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        }),
+      });
+
+      if ((res.status === 429 || res.status >= 500) && attempt < OpenAICompatibleProvider.MAX_RETRIES) {
+        const waitMs = retryDelayMs(res.headers.get("Retry-After"), attempt);
+        console.warn(`  ${this.name} → ${res.status}, reintento en ${Math.round(waitMs / 1000)}s…`);
+        await sleep(waitMs);
+        continue;
+      }
+
+      const body = (await res.json().catch(() => ({}))) as ChatCompletionResponse;
+      if (!res.ok) {
+        throw new ProviderError(
+          `${this.name} → HTTP ${res.status}: ${body.error?.message ?? "sin detalle"}`,
+          res.status === 429 || res.status >= 500,
+        );
+      }
+      const choice = body.choices?.[0];
+      return {
+        text: choice?.message?.content ?? "",
+        truncated: choice?.finish_reason === "length",
+      };
+    }
+  }
+}
+
+/** Retry-After en segundos si viene; si no, backoff exponencial con jitter (máx. ~60s). */
+export function retryDelayMs(retryAfter: string | null, attempt: number): number {
+  const seconds = Number(retryAfter);
+  if (retryAfter && Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+  return Math.min(60_000, 2 ** attempt * 2_000) + Math.floor(Math.random() * 500);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

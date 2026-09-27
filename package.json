@@ -1,0 +1,25 @@
+{
+  "name": "readwise-translator",
+  "version": "1.0.0",
+  "description": "Traduce documentos completos de Readwise Reader con Claude y los guarda como documento nuevo",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "translate": "tsx --env-file-if-exists=.env src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "node-html-parser": "^9.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.0",
+    "vitest": "^5.0.0"
+  }
+}
