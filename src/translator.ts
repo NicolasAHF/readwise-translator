@@ -69,13 +69,18 @@ export function validateTranslation(source: Chunk, raw: string, truncated: boole
   const html = stripCodeFences(raw).trim();
   if (!html) return { ok: false, html, problem: "the output was empty" };
 
-  const expected = [...source.placeholderIds].sort((a, b) => a - b);
-  const got = placeholderIdsIn(html).sort((a, b) => a - b);
+  // Mismo conjunto Y mismo orden: los placeholders incluyen tags de apertura/cierre de
+  // contenedores, así que un reordenamiento rompe el anidamiento del HTML.
+  const expected = source.placeholderIds;
+  const got = placeholderIdsIn(html);
   if (expected.join(",") !== got.join(",")) {
+    const sameSet = [...expected].sort((a, b) => a - b).join(",") === [...got].sort((a, b) => a - b).join(",");
     return {
       ok: false,
       html,
-      problem: `the rw-keep placeholders do not match (expected ids [${expected}], got [${got}])`,
+      problem: sameSet
+        ? `the rw-keep placeholders were reordered (expected order [${expected}], got [${got}])`
+        : `the rw-keep placeholders do not match (expected ids [${expected}], got [${got}])`,
     };
   }
 

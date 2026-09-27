@@ -128,6 +128,60 @@ describe("validateTranslation", () => {
     const src = { html: `<p>${"lorem ipsum ".repeat(40)}</p>`, placeholderIds: [] };
     expect(validateTranslation(src, "<p>resumen</p>", false)).toMatchObject({ ok: false, problem: expect.stringContaining("length") });
   });
+
+  it("rechaza salida que es solo espacios", () => {
+    const src = { html: "<p>x</p>", placeholderIds: [] };
+    expect(validateTranslation(src, "  \n\t ", false)).toMatchObject({ ok: false, problem: expect.stringContaining("empty") });
+  });
+
+  describe("placeholders", () => {
+    const src = { html: '<rw-keep id="3"></rw-keep><p>the text</p><rw-keep id="7"></rw-keep>', placeholderIds: [3, 7] };
+
+    it("acepta los mismos placeholders en el mismo orden", () => {
+      expect(validateTranslation(src, '<rw-keep id="3"></rw-keep><p>el texto</p><rw-keep id="7"></rw-keep>', false).ok).toBe(true);
+    });
+
+    it("rechaza placeholders reordenados (rompería el anidamiento de contenedores)", () => {
+      const res = validateTranslation(src, '<rw-keep id="7"></rw-keep><p>el texto</p><rw-keep id="3"></rw-keep>', false);
+      expect(res).toMatchObject({ ok: false, problem: expect.stringContaining("reordered") });
+    });
+
+    it("rechaza un placeholder faltante con un mensaje distinto", () => {
+      const res = validateTranslation(src, '<rw-keep id="3"></rw-keep><p>el texto</p>', false);
+      expect(res).toMatchObject({ ok: false, problem: expect.stringContaining("do not match") });
+    });
+  });
+
+  describe("tolerancia de estructura: max(2, 10% de los tags)", () => {
+    const paragraphs = (n: number) => "<p>x</p>".repeat(n);
+
+    it.each([
+      [20, 18, true], //  tolerancia 2: faltan 2 → ok
+      [20, 17, false], // faltan 3 → rechazo
+      [40, 36, true], //  tolerancia 4 (10%): faltan 4 → ok
+      [40, 35, false], // faltan 5 → rechazo
+      [40, 44, true], //  sobran 4 → ok
+      [40, 45, false], // sobran 5 → rechazo
+    ])("%i tags en origen, %i en la salida → ok=%s", (tagsIn, tagsOut, ok) => {
+      const res = validateTranslation({ html: paragraphs(tagsIn), placeholderIds: [] }, paragraphs(tagsOut), false);
+      expect(res.ok).toBe(ok);
+    });
+  });
+
+  describe("tolerancia de largo del texto: 0.4x a 2.5x, solo si el origen supera 200 chars", () => {
+    const p = (n: number) => `<p>${"a".repeat(n)}</p>`;
+
+    it.each([
+      [200, 1, true], //   origen corto: no se chequea
+      [201, 1, false], //  apenas supera 200: sí se chequea
+      [1_000, 400, true], // justo 0.4x
+      [1_000, 399, false],
+      [1_000, 2_500, true], // justo 2.5x
+      [1_000, 2_501, false],
+    ])("%i chars → %i chars: ok=%s", (lenIn, lenOut, ok) => {
+      expect(validateTranslation({ html: p(lenIn), placeholderIds: [] }, p(lenOut), false).ok).toBe(ok);
+    });
+  });
 });
 
 describe("helpers", () => {

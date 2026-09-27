@@ -64,6 +64,43 @@ describe("translateDocument — guardado", () => {
     expect(saved.html).toContain("cache.get(key)");
   });
 
+  it("copia imagen y fecha de publicación; las omite si el original no las tiene", async () => {
+    const reader = fakeReader();
+    await translateDocument(baseDoc, reader, new FakeProvider(), opts);
+    expect(reader.saveDocument.mock.calls[0]![0]).toMatchObject({
+      image_url: "https://blog.example.com/cover.png",
+      published_date: "2026-09-01",
+    });
+
+    const bare = fakeReader();
+    await translateDocument({ ...baseDoc, image_url: null, published_date: null, author: null, summary: null }, bare, new FakeProvider(), opts);
+    const saved = bare.saveDocument.mock.calls[0]![0];
+    for (const key of ["image_url", "published_date", "author", "summary"]) expect(saved).not.toHaveProperty(key);
+  });
+
+  it("un documento que es solo código se guarda igual (0 chunks a traducir no es 'falló todo')", async () => {
+    const reader = fakeReader();
+    const provider = new FakeProvider();
+    const res = await translateDocument({ ...baseDoc, html_content: "<pre>npm install</pre>" }, reader, provider, opts);
+    expect(res.failedChunks).toBe(0);
+    expect(reader.saveDocument).toHaveBeenCalledOnce();
+    expect(provider.calls).toHaveLength(1); // solo título/resumen
+    expect(res.totalRequests).toBe(1);
+  });
+
+  it("totalRequests cuenta chunks del cuerpo + 1 de metadatos", async () => {
+    const provider = new FakeProvider();
+    const res = await translateDocument(baseDoc, fakeReader(), provider, opts);
+    expect(res.totalRequests).toBe(provider.calls.length);
+    expect(res.totalRequests).toBeGreaterThan(2);
+  });
+
+  it("saltea documentos cuyo HTML es solo espacios", async () => {
+    await expect(
+      translateDocument({ ...baseDoc, html_content: "  \n  " }, fakeReader(), new FakeProvider(), opts),
+    ).rejects.toBeInstanceOf(SkipError);
+  });
+
   it("dry-run no toca Reader pero incluye el link en el HTML", async () => {
     const reader = fakeReader();
     const res = await translateDocument(baseDoc, reader, new FakeProvider(), { ...opts, dryRun: true, originalAction: "delete" });
@@ -118,6 +155,14 @@ describe("translateDocument — qué pasa con el original", () => {
   it("keep sin tag disparador (modo id): no toca nada", async () => {
     const reader = fakeReader();
     await translateDocument(baseDoc, reader, new FakeProvider(), { ...opts, triggerTag: undefined });
+    expect(reader.updateDocument).not.toHaveBeenCalled();
+  });
+
+  it("keep con triggerTag configurado pero el original no lo tiene: no toca el original", async () => {
+    const reader = fakeReader();
+    const doc = { ...baseDoc, tags: { "system-design": { name: "system-design" } } };
+    const res = await translateDocument(doc, reader, new FakeProvider(), opts);
+    expect(res.original).toEqual({ action: "kept" });
     expect(reader.updateDocument).not.toHaveBeenCalled();
   });
 
@@ -176,6 +221,12 @@ describe("translateDocument — qué pasa con el original", () => {
     expect(reader.deleteDocument).not.toHaveBeenCalled();
   });
 
+  it("una nota con solo espacios no bloquea el borrado", async () => {
+    const reader = fakeReader();
+    const res = await translateDocument({ ...baseDoc, notes: "   \n " }, reader, new FakeProvider(), { ...opts, originalAction: "delete" });
+    expect(res.original).toEqual({ action: "deleted" });
+  });
+
   it("los motivos nunca incluyen el título (logs públicos)", async () => {
     const reader = fakeReader();
     for (const highlights of [true, "unknown"] as const) {
@@ -198,6 +249,11 @@ describe("helpers", () => {
     expect(isWebUrl("http://a.com")).toBe(true);
     expect(isWebUrl("https://readwise.io/x")).toBe(false);
     expect(isWebUrl("https://read.readwise.io/x")).toBe(false);
+    // Solo el dominio exacto o sus subdominios: estos son sitios ajenos.
+    expect(isWebUrl("https://readwise.io.example.com/x")).toBe(true);
+    expect(isWebUrl("https://notreadwise.io/x")).toBe(true);
+    expect(isWebUrl("ftp://a.com/x")).toBe(false);
+    expect(isWebUrl("")).toBe(false);
     expect(isWebUrl("mailto:x@y.com")).toBe(false);
     expect(isWebUrl("no es url")).toBe(false);
     expect(isWebUrl(null)).toBe(false);
@@ -212,5 +268,9 @@ describe("helpers", () => {
     expect(sourceHeader(doc, "ja")).toContain("Machine translation of");
     // Sin URL web, linkea al documento de Reader (que en ese caso nunca se borra).
     expect(sourceHeader({ ...doc, source_url: null }, "es")).toContain('href="u"');
+    // Título vacío o de solo espacios: se muestra la URL.
+    expect(sourceHeader({ ...doc, title: "   " }, "es")).toContain(">https://a.com/?q=1&amp;b=%3Cx%3E</a>");
+    expect(sourceHeader({ ...doc, title: "  Con espacios  " }, "es")).toContain(">Con espacios</a>");
+    expect(sourceHeader({ ...doc, author: "Ana" }, "es")).toContain("</a> — Ana</p>");
   });
 });

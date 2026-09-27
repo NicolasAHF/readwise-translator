@@ -46,14 +46,21 @@ export function createProvider(config: Config["provider"]): LlmProvider {
       );
 }
 
+/** Lo único que usamos del SDK: permite inyectar un fake en tests. */
+export type AnthropicMessagesClient = Pick<Anthropic, "messages">;
+
 export class AnthropicProvider implements LlmProvider {
   readonly name: string;
-  private readonly client: Anthropic;
+  private readonly client: AnthropicMessagesClient;
 
-  constructor(apiKey: string, private readonly model: string) {
+  constructor(
+    apiKey: string,
+    private readonly model: string,
+    client?: AnthropicMessagesClient,
+  ) {
     this.name = `anthropic/${model}`;
     // El SDK ya reintenta 429/5xx con backoff.
-    this.client = new Anthropic({ apiKey, maxRetries: 5 });
+    this.client = client ?? new Anthropic({ apiKey, maxRetries: 5 });
   }
 
   async complete({ system, user, maxTokens }: CompletionRequest): Promise<CompletionResult> {

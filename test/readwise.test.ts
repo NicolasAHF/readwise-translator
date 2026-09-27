@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { OpenAICompatibleProvider, parseApiError, QuotaExhaustedError, REASONING_HEADROOM_TOKENS } from "../src/providers.js";
-import { parseDocumentId, ReadwiseApiError, ReadwiseClient } from "../src/readwise.js";
+import { parseDocumentId, ReadwiseApiError, ReadwiseClient, tagNames } from "../src/readwise.js";
 
 const ID = "01k5xyzabcdefghijklmnopqrs";
 
@@ -15,6 +15,14 @@ describe("parseDocumentId", () => {
 
   it("rechaza basura", () => {
     expect(() => parseDocumentId("https://example.com/article")).toThrow();
+    expect(() => parseDocumentId("abc123")).toThrow(); // id demasiado corto
+    expect(() => parseDocumentId(`https://read.readwise.io/new/read/abc`)).toThrow();
+  });
+
+  it("tagNames devuelve los nombres (no las keys) y tolera tags null", () => {
+    const base = { id: "x", url: "", source_url: null, title: null, author: null, category: "article", image_url: null, published_date: null, summary: null, parent_id: null };
+    expect(tagNames({ ...base, tags: { "system-design": { name: "System Design" } } })).toEqual(["System Design"]);
+    expect(tagNames({ ...base, tags: null })).toEqual([]);
   });
 });
 
@@ -47,6 +55,71 @@ describe("ReadwiseClient", () => {
     await new ReadwiseClient("tok").deleteDocument("abc");
     expect(fetchMock.mock.calls[0]![0]).toBe("https://readwise.io/api/v3/delete/abc/");
     expect(fetchMock.mock.calls[0]![1].method).toBe("DELETE");
+  });
+
+  it("sin token falla al construir", () => {
+    expect(() => new ReadwiseClient("")).toThrow(/READWISE_TOKEN/);
+  });
+
+  describe("getDocument", () => {
+    it("pide el id con html_content y devuelve el documento", async () => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ results: [{ id: "abc", title: "T" }], nextPageCursor: null })));
+      vi.stubGlobal("fetch", fetchMock);
+      expect(await new ReadwiseClient("tok").getDocument("abc")).toMatchObject({ id: "abc" });
+      const url = new URL((fetchMock.mock.calls[0] as unknown as [string])[0]);
+      expect(url.pathname).toBe("/api/v3/list/");
+      expect(Object.fromEntries(url.searchParams)).toEqual({ id: "abc", withHtmlContent: "true" });
+    });
+
+    it("null si no existe", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ results: [], nextPageCursor: null }))));
+      expect(await new ReadwiseClient("tok").getDocument("nope")).toBeNull();
+    });
+  });
+
+  describe("listByTag", () => {
+    it("recorre todas las páginas y descarta highlights/notas (parent_id)", async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ results: [{ id: "a", parent_id: null }, { id: "h1", parent_id: "a" }], nextPageCursor: "c2" })))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ results: [{ id: "b", parent_id: null }], nextPageCursor: null })));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const docs = await new ReadwiseClient("tok").listByTag("translate");
+      expect(docs.map((d) => d.id)).toEqual(["a", "b"]);
+
+      const [first, second] = fetchMock.mock.calls.map((c) => new URL(c[0]).searchParams);
+      expect(first!.get("tag")).toBe("translate");
+      expect(first!.get("withHtmlContent")).toBe("true");
+      expect(first!.has("pageCursor")).toBe(false);
+      expect(second!.get("pageCursor")).toBe("c2");
+    });
+  });
+
+  it("reintenta 5xx con backoff y termina bien", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response("", { status: 502 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ id: "x", url: "u" }), { status: 201 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = new ReadwiseClient("tok").saveDocument({ url: "https://a.com", html: "<p/>" });
+      await vi.advanceTimersByTimeAsync(900);
+      expect(fetchMock).toHaveBeenCalledOnce(); // backoff inicial de 1s
+      await vi.advanceTimersByTimeAsync(200);
+      expect(await pending).toEqual({ id: "x", url: "u", alreadyExisted: false }); // 201 = creado
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("updateDocument manda PATCH con solo los campos pedidos", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    vi.stubGlobal("fetch", fetchMock);
+    await new ReadwiseClient("tok").updateDocument("doc1", { location: "archive" });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://readwise.io/api/v3/update/doc1/");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({ location: "archive" });
   });
 
   describe("hasHighlights", () => {

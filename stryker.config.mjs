@@ -36,13 +36,13 @@ export default {
   htmlReporter: { fileName: "reports/mutation/mutation.html" },
   jsonReporter: { fileName: "reports/mutation/mutation.json" },
 
-  // Línea de base (sep 2026): 68,6%. break justo debajo para detectar regresiones;
-  // subilo a medida que se maten sobrevivientes.
+  // Historial: 68,6% (primera medición) → 84,0% (tests para los huecos detectados).
+  // break justo debajo del score actual para detectar regresiones; subilo cuando mejore.
   thresholds: {
-    high: 80,
-    low: 70,
+    high: 90,
+    low: 80,
     // Por debajo de esto `stryker run` sale con error (y el workflow falla).
-    break: 65,
+    break: 80,
   },
 
   // Los tests del RateLimiter y los reintentos usan timers: margen para mutantes lentos.
