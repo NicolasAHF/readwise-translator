@@ -38,6 +38,8 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL || 'gemini-flash-latest' }}
           # Modelos que razonan (Gemini 3, gpt-oss): "low" lo minimiza y suma margen de tokens.
           LLM_REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'low' }}
+          # Tokens extra de salida para el razonamiento (Groq free: bajalo a ~1024 por su límite de 8K TPM).
+          LLM_REASONING_HEADROOM: ${{ vars.LLM_REASONING_HEADROOM || '8192' }}
           # Free tier: de a un chunk, con margen bajo el límite de RPM (menos 429/503).
           CONCURRENCY: ${{ vars.CONCURRENCY || '1' }}
           REQUESTS_PER_MINUTE: ${{ vars.REQUESTS_PER_MINUTE || '5' }}

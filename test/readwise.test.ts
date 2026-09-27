@@ -102,6 +102,15 @@ describe("OpenAICompatibleProvider", () => {
     });
   });
 
+  it("el margen de razonamiento es configurable (Groq: TPM chico)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "x" } }] })));
+    await new OpenAICompatibleProvider("https://api.groq.com/openai/v1", "k", "openai/gpt-oss-120b", fetchMock, "low", 1_024)
+      .complete({ system: "", user: "", maxTokens: 2_000 });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body).max_tokens).toBe(3_024);
+    expect(loadConfig({ READWISE_TOKEN: "t", LLM_MODEL: "m", LLM_REASONING_EFFORT: "low", LLM_REASONING_HEADROOM: "1024" }).provider)
+      .toMatchObject({ reasoningEffort: "low", reasoningHeadroom: 1_024 });
+  });
+
   it("sin reasoning_effort no manda el campo ni suma margen", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "x" } }] })));
     await new OpenAICompatibleProvider("https://g.example/v1", "k", "llama", fetchMock).complete({ system: "", user: "", maxTokens: 1_000 });

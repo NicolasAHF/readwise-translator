@@ -36,7 +36,14 @@ export class ProviderError extends Error {
 export function createProvider(config: Config["provider"]): LlmProvider {
   return config.kind === "anthropic"
     ? new AnthropicProvider(config.apiKey, config.model)
-    : new OpenAICompatibleProvider(config.baseUrl, config.apiKey, config.model, fetch, config.reasoningEffort);
+    : new OpenAICompatibleProvider(
+        config.baseUrl,
+        config.apiKey,
+        config.model,
+        fetch,
+        config.reasoningEffort,
+        config.reasoningHeadroom,
+      );
 }
 
 export class AnthropicProvider implements LlmProvider {
@@ -84,12 +91,17 @@ export class OpenAICompatibleProvider implements LlmProvider {
     private readonly fetchImpl: typeof fetch = fetch,
     /** "none" | "minimal" | "low" | "medium" | "high". Solo para modelos con razonamiento. */
     private readonly reasoningEffort?: string,
+    /**
+     * Margen de salida para el razonamiento. Bajalo en proveedores que cuentan
+     * max_tokens contra un límite de tokens por minuto chico (ej. Groq free: 8K TPM).
+     */
+    private readonly reasoningHeadroom: number = REASONING_HEADROOM_TOKENS,
   ) {
     this.name = `${new URL(baseUrl).host}/${model}`;
   }
 
   async complete({ system, user, maxTokens: baseMaxTokens }: CompletionRequest): Promise<CompletionResult> {
-    const maxTokens = this.reasoningEffort ? baseMaxTokens + REASONING_HEADROOM_TOKENS : baseMaxTokens;
+    const maxTokens = this.reasoningEffort ? baseMaxTokens + this.reasoningHeadroom : baseMaxTokens;
     for (let attempt = 0; ; attempt++) {
       const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: "POST",

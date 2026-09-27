@@ -19,7 +19,14 @@ export interface Config {
   originalAction: OriginalAction;
   provider:
     | { kind: "anthropic"; apiKey: string; model: string }
-    | { kind: "openai-compatible"; baseUrl: string; apiKey: string; model: string; reasoningEffort?: string };
+    | {
+        kind: "openai-compatible";
+        baseUrl: string;
+        apiKey: string;
+        model: string;
+        reasoningEffort?: string;
+        reasoningHeadroom?: number;
+      };
 }
 
 type Env = Record<string, string | undefined>;
@@ -42,6 +49,9 @@ export function loadConfig(env: Env = process.env): Config {
             apiKey: env.LLM_API_KEY ?? "",
             model: required(env, "LLM_MODEL"),
             ...(env.LLM_REASONING_EFFORT ? { reasoningEffort: parseReasoningEffort(env.LLM_REASONING_EFFORT) } : {}),
+            ...(env.LLM_REASONING_HEADROOM
+              ? { reasoningHeadroom: positiveInt(env, "LLM_REASONING_HEADROOM", 0, true) }
+              : {}),
           }
         : fail(`PROVIDER inválido: "${kind}" (usá "openai-compatible" o "anthropic")`);
 
