@@ -98,6 +98,16 @@ Cualquier endpoint `/chat/completions` sirve: solo cambiás `LLM_BASE_URL` y `LL
 ## Desarrollo
 
 ```bash
-npm test          # vitest
+npm test               # vitest
 npm run typecheck
+npm run test:mutation  # Stryker, ~3 min: qué tan buenos son los tests (reports/mutation/mutation.html)
 ```
+
+### Mutation testing
+
+La cobertura dice qué líneas corren los tests; el **mutation testing** dice si los tests *notan* cuando esas líneas cambian. Stryker introduce bugs chicos en `src/` (invierte un `&&`, cambia `>` por `>=`, vacía una función…) y corre los tests contra cada uno. Si ningún test falla, el mutante "sobrevive" y eso marca un hueco.
+
+- Corre solo el 1 de cada mes y a mano desde *Actions → mutation-testing → Run workflow*. El resumen por archivo aparece en la página del run, y el detalle mutante por mutante en el artifact `mutation-report`.
+- Línea de base: **68,6%**. El workflow falla si baja de 65% (`thresholds.break` en `stryker.config.mjs`); subilo a medida que mejoren los tests.
+- Se excluyen `src/cli.ts` (entrypoint sin lógica testeable) y las mutaciones de strings (mensajes y prompt: ruido sin señal).
+- Vitest está en 4.x a propósito: el runner de Stryker 10 todavía no soporta Vitest 5. Con Vitest 5 los mutantes nunca se activan y el score da 0%.
