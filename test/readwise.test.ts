@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
-import { OpenAICompatibleProvider, REASONING_HEADROOM_TOKENS } from "../src/providers.js";
+import { OpenAICompatibleProvider, parseApiError, QuotaExhaustedError, REASONING_HEADROOM_TOKENS } from "../src/providers.js";
 import { parseDocumentId, ReadwiseApiError, ReadwiseClient } from "../src/readwise.js";
 
 const ID = "01k5xyzabcdefghijklmnopqrs";
@@ -110,10 +110,68 @@ describe("OpenAICompatibleProvider", () => {
     expect(body.max_tokens).toBe(1_000);
   });
 
+  const googleQuota = (quotaId: string, retryDelay?: string) =>
+    JSON.stringify([{
+      error: {
+        code: 429,
+        message: `Quota exceeded for metric: generate_content_free_tier_requests, limit: 20, model: gemini-3-flash\nPlease retry in 37s.`,
+        status: "RESOURCE_EXHAUSTED",
+        details: [
+          { "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaId, quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests" }] },
+          ...(retryDelay ? [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay }] : []),
+        ],
+      },
+    }]);
+
+  it("429 por cuota diaria: corta sin reintentar", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(googleQuota("GenerateRequestsPerDayPerProjectPerModel-FreeTier"), { status: 429 }));
+    const p = new OpenAICompatibleProvider("https://g.example/v1", "k", "gemini", fetchMock);
+    const err = await p.complete({ system: "", user: "", maxTokens: 1 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(QuotaExhaustedError);
+    expect((err as Error).message).toMatch(/cuota diaria agotada.*limit: 20/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("429 por minuto: espera el retryDelay que indica Google y reintenta", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response(googleQuota("GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "3s"), { status: 429 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] })));
+      const p = new OpenAICompatibleProvider("https://g.example/v1", "k", "gemini", fetchMock);
+      const pending = p.complete({ system: "", user: "", maxTokens: 1 });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // todavía esperando (3s + 0.5s de margen)
+      await vi.advanceTimersByTimeAsync(600);
+      expect((await pending).text).toBe("ok");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("no manda Authorization si no hay key (Ollama)", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "x" } }] })));
     await new OpenAICompatibleProvider("http://localhost:11434/v1", "", "qwen", fetchMock).complete({ system: "", user: "", maxTokens: 1 });
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
+  });
+});
+
+describe("parseApiError", () => {
+  it("formato OpenAI", () => {
+    expect(parseApiError('{"error":{"message":"Rate limit reached"}}')).toEqual({ message: "Rate limit reached", daily: false });
+  });
+  it("formato Google con retryDelay decimal", () => {
+    const info = parseApiError(JSON.stringify({ error: { message: "slow down", details: [{ retryDelay: "12.3s" }] } }));
+    expect(info).toMatchObject({ daily: false, retryDelayMs: 12_800 });
+  });
+  it("detecta cuota diaria por el mensaje aunque no haya details", () => {
+    expect(parseApiError('{"error":{"message":"Requests per day exceeded"}}').daily).toBe(true);
+  });
+  it("body no JSON (ej. HTML de un 503) queda en una línea recortada", () => {
+    const info = parseApiError(`<html>\n${"x".repeat(500)}</html>`);
+    expect(info.message.length).toBeLessThanOrEqual(200);
+    expect(info.message).not.toContain("\n");
   });
 });
 

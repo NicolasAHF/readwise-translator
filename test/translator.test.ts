@@ -10,6 +10,7 @@ import {
   validateTranslation,
 } from "../src/translator.js";
 import { ARTICLE, FakeProvider, fakeTranslate, stripRetryNote } from "./fixtures.js";
+import { QuotaExhaustedError } from "../src/providers.js";
 
 const opts = { targetLang: "es", chunkChars: 300, concurrency: 3, requestsPerMinute: 0 };
 
@@ -78,6 +79,14 @@ describe("translateHtml", () => {
     expect(res.failedChunks).toEqual([0]);
     expect(provider.calls).toHaveLength(2);
     expect(res.html).toBe(html);
+  });
+
+  it("sin cuota diaria aborta todo el documento en vez de marcar chunks fallidos", async () => {
+    const provider = new FakeProvider(() => {
+      throw new QuotaExhaustedError("cuota diaria agotada");
+    });
+    await expect(translateHtml(provider, ARTICLE, opts)).rejects.toBeInstanceOf(QuotaExhaustedError);
+    expect(provider.calls.length).toBeLessThanOrEqual(opts.concurrency);
   });
 
   it("sobrevive a errores de red del proveedor", async () => {

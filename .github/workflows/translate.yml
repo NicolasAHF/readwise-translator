@@ -32,9 +32,11 @@ jobs:
           PROVIDER: openai-compatible
           LLM_BASE_URL: https://generativelanguage.googleapis.com/v1beta/openai
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_MODEL: gemini-flash-latest
+          # Configurables sin tocar código: Settings → Secrets and variables → Actions → Variables.
+          # Si no existe la variable, se usa el default de la derecha.
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'gemini-flash-latest' }}
           # Gemini 3 siempre razona; "low" lo minimiza y suma margen de tokens para que no se corte.
-          LLM_REASONING_EFFORT: low
+          LLM_REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'low' }}
           # Free tier: de a un chunk, con margen bajo el límite de RPM (menos 429/503).
           CONCURRENCY: "1"
           REQUESTS_PER_MINUTE: "5"

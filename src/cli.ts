@@ -10,7 +10,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { loadConfig, parseOriginalAction } from "./config.js";
 import { SkipError, translateDocument } from "./pipeline.js";
-import { createProvider } from "./providers.js";
+import { createProvider, QuotaExhaustedError } from "./providers.js";
 import { parseDocumentId, ReadwiseClient, type ReaderDocument } from "./readwise.js";
 import { estimateRequests } from "./translator.js";
 import { docLabel, originalLabel, savedLabel } from "./output.js";
@@ -98,6 +98,12 @@ async function main(): Promise<number> {
       if (!quiet) process.stdout.write("\n");
       if (err instanceof SkipError) {
         console.log(`  ↷ salteado: ${err.message}\n`);
+      } else if (err instanceof QuotaExhaustedError) {
+        // No se guardó nada: el original sigue intacto y con el tag, se reintenta en otra corrida.
+        const pending = docs.length - docs.indexOf(doc);
+        console.error(`  ✗ ${err.message}`);
+        console.error(`  Se corta acá: ${pending} documento(s) quedan con el tag para la próxima corrida.\n`);
+        return 1;
       } else {
         failures++;
         console.error(`  ✗ ${(err as Error).message}\n`);

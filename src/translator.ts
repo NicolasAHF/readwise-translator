@@ -15,7 +15,7 @@ import {
   visibleText,
   type Chunk,
 } from "./html-chunker.js";
-import type { LlmProvider } from "./providers.js";
+import { QuotaExhaustedError, type LlmProvider } from "./providers.js";
 
 export interface TranslateOptions {
   targetLang: string;
@@ -126,6 +126,8 @@ export async function translateChunk(
       if (check.ok) return { html: check.html, ok: true };
       lastProblem = check.problem;
     } catch (err) {
+      // Sin cuota no tiene sentido seguir con este ni con ningún otro chunk.
+      if (err instanceof QuotaExhaustedError) throw err;
       lastProblem = `a request error occurred (${(err as Error).message})`;
     }
     console.warn(`  intento ${attempt}/${maxAttempts} rechazado: ${lastProblem}`);

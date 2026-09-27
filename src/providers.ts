@@ -109,20 +109,23 @@ export class OpenAICompatibleProvider implements LlmProvider {
         }),
       });
 
-      if ((res.status === 429 || res.status >= 500) && attempt < OpenAICompatibleProvider.MAX_RETRIES) {
-        const waitMs = retryDelayMs(res.headers.get("Retry-After"), attempt);
-        console.warn(`  ${this.name} → ${res.status}, reintento en ${Math.round(waitMs / 1000)}s…`);
-        await sleep(waitMs);
-        continue;
+      const text = await res.text();
+      if (!res.ok) {
+        const err = parseApiError(text);
+        // Cuota diaria agotada: reintentar solo quema tiempo (y minutos de CI). Se aborta todo.
+        if (res.status === 429 && err.daily) {
+          throw new QuotaExhaustedError(`${this.name}: cuota diaria agotada — ${err.message}`);
+        }
+        if ((res.status === 429 || res.status >= 500) && attempt < OpenAICompatibleProvider.MAX_RETRIES) {
+          const waitMs = err.retryDelayMs ?? retryDelayMs(res.headers.get("Retry-After"), attempt);
+          console.warn(`  ${this.name} → ${res.status} (${err.message}), reintento en ${Math.round(waitMs / 1000)}s…`);
+          await sleep(waitMs);
+          continue;
+        }
+        throw new ProviderError(`${this.name} → HTTP ${res.status}: ${err.message}`, res.status === 429 || res.status >= 500);
       }
 
-      const body = (await res.json().catch(() => ({}))) as ChatCompletionResponse;
-      if (!res.ok) {
-        throw new ProviderError(
-          `${this.name} → HTTP ${res.status}: ${body.error?.message ?? "sin detalle"}`,
-          res.status === 429 || res.status >= 500,
-        );
-      }
+      const body = (text ? JSON.parse(text) : {}) as ChatCompletionResponse;
       const choice = body.choices?.[0];
       return {
         text: choice?.message?.content ?? "",
@@ -130,6 +133,63 @@ export class OpenAICompatibleProvider implements LlmProvider {
       };
     }
   }
+}
+
+/** Se agotó una cuota que no se libera en minutos (ej. requests por día del free tier). */
+export class QuotaExhaustedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "QuotaExhaustedError";
+  }
+}
+
+export interface ApiErrorInfo {
+  /** Mensaje corto (una línea, máx. 200 chars). Nunca contiene el contenido traducido. */
+  message: string;
+  /** Espera sugerida por el proveedor (RetryInfo de Google), si vino. */
+  retryDelayMs?: number;
+  /** La cuota agotada es diaria. */
+  daily: boolean;
+}
+
+interface GoogleErrorDetail {
+  "@type"?: string;
+  retryDelay?: string;
+  violations?: { quotaId?: string; quotaMetric?: string }[];
+}
+
+/**
+ * Interpreta el body de error. Soporta el formato OpenAI ({error:{message}}) y el de
+ * Google ({error:{message, details:[QuotaFailure, RetryInfo]}}), que el endpoint
+ * OpenAI-compatible de Gemini a veces devuelve envuelto en un array.
+ */
+export function parseApiError(text: string): ApiErrorInfo {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { message: oneLine(text) || "sin detalle", daily: false };
+  }
+  const root = (Array.isArray(parsed) ? parsed[0] : parsed) as { error?: { message?: string; details?: GoogleErrorDetail[] } } | undefined;
+  const error = root?.error;
+  const details = error?.details ?? [];
+
+  const quotaIds = details.flatMap((d) => d.violations ?? []).map((v) => `${v.quotaId ?? ""} ${v.quotaMetric ?? ""}`);
+  const daily = quotaIds.some((q) => /per ?day/i.test(q)) || /per ?day/i.test(error?.message ?? "");
+
+  const delay = details.find((d) => d.retryDelay)?.retryDelay?.match(/^([\d.]+)s$/)?.[1];
+  const retryDelayMs = delay ? Math.ceil(Number(delay) * 1000) + 500 : undefined;
+
+  return {
+    message: oneLine(error?.message ?? "") || "sin detalle",
+    daily,
+    ...(retryDelayMs !== undefined ? { retryDelayMs } : {}),
+  };
+}
+
+function oneLine(s: string): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > 200 ? flat.slice(0, 197) + "…" : flat;
 }
 
 /** Retry-After en segundos si viene; si no, backoff exponencial con jitter (máx. ~60s). */
