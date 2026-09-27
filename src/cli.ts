@@ -13,6 +13,7 @@ import { SkipError, translateDocument } from "./pipeline.js";
 import { createProvider } from "./providers.js";
 import { parseDocumentId, ReadwiseClient, type ReaderDocument } from "./readwise.js";
 import { estimateRequests } from "./translator.js";
+import { docLabel, savedLabel } from "./output.js";
 
 async function main(): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -21,15 +22,18 @@ async function main(): Promise<number> {
       tag: { type: "boolean", default: false },
       lang: { type: "string" },
       "dry-run": { type: "boolean", default: false },
+      quiet: { type: "boolean", short: "q", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
   });
+  const quiet = values.quiet;
 
   if (values.help || (!values.tag && positionals.length === 0)) {
     console.log(
       "Uso:\n" +
-        "  npm run translate -- <id|url> [--lang es] [--dry-run]\n" +
-        "  npm run translate -- --tag [--lang es] [--dry-run]",
+        "  npm run translate -- <id|url> [--lang es] [--dry-run] [--quiet]\n" +
+        "  npm run translate -- --tag [--lang es] [--dry-run] [--quiet]\n\n" +
+        "  --quiet  no imprime títulos ni URLs (para logs públicos de CI)",
     );
     return values.help ? 0 : 1;
   }
@@ -57,7 +61,7 @@ async function main(): Promise<number> {
 
   for (const doc of docs) {
     const requests = doc.html_content ? estimateRequests(doc.html_content, config.chunkChars) + 1 : 0;
-    console.log(`▶ ${doc.title ?? doc.id}  (~${requests} requests al LLM)`);
+    console.log(`▶ ${docLabel(doc, quiet)}  (~${requests} requests al LLM)`);
     const started = Date.now();
     try {
       const result = await translateDocument(doc, reader, provider, {
@@ -67,9 +71,10 @@ async function main(): Promise<number> {
         requestsPerMinute: config.requestsPerMinute,
         triggerTag: values.tag ? config.triggerTag : undefined,
         dryRun,
-        onProgress: (done, total) => process.stdout.write(`\r  chunks ${done}/${total}`),
+        // En CI no hay TTY: el \r ensucia el log, así que en quiet no hay barra de progreso.
+        onProgress: quiet ? undefined : (done, total) => process.stdout.write(`\r  chunks ${done}/${total}`),
       });
-      process.stdout.write("\n");
+      if (!quiet) process.stdout.write("\n");
 
       const secs = ((Date.now() - started) / 1000).toFixed(1);
       const warn = result.failedChunks ? ` ⚠ ${result.failedChunks} chunk(s) quedaron sin traducir` : "";
@@ -77,13 +82,12 @@ async function main(): Promise<number> {
         await mkdir("out", { recursive: true });
         const path = `out/${doc.id}.${targetLang}.html`;
         await writeFile(path, `<!doctype html><meta charset="utf-8"><title>${result.title}</title>\n${result.html}`);
-        console.log(`  ✓ ${result.title} → ${path} (${secs}s)${warn}\n`);
+        console.log(`  ✓ ${quiet ? "" : result.title + " "}→ ${path} (${secs}s)${warn}\n`);
       } else {
-        const how = result.saved?.alreadyExisted ? "ya existía" : "creado";
-        console.log(`  ✓ ${result.title} → ${result.saved?.url} [${how}] (${secs}s)${warn}\n`);
+        console.log(`  ✓ ${savedLabel(result, quiet)} (${secs}s)${warn}\n`);
       }
     } catch (err) {
-      process.stdout.write("\n");
+      if (!quiet) process.stdout.write("\n");
       if (err instanceof SkipError) {
         console.log(`  ↷ salteado: ${err.message}\n`);
       } else {

@@ -31,9 +31,19 @@ npm run translate -- 01k5... --dry-run
 
 # Modo cola: todo lo que tenga el tag "translate"; al terminar bien se le saca el tag
 npm run translate -- --tag
+
+# Sin títulos ni URLs en la salida (para CI con logs públicos)
+npm run translate -- --tag --quiet
 ```
 
 El modo `--tag` es el más cómodo: marcás artículos con `translate` desde el celular y el workflow de `.github/workflows/translate.yml` los procesa cada hora. Para eso agregá los secrets `READWISE_TOKEN` y `LLM_API_KEY` al repo.
+
+### Correrlo desde un repo público sin exponer nada
+
+- **Tokens:** van en *Settings → Secrets and variables → Actions*. Quedan cifrados, GitHub los enmascara en los logs y los PRs desde forks no los reciben. El workflow solo se dispara por cron o a mano (`workflow_dispatch`), así que ningún tercero lo puede correr con tus secrets. `.env` está en `.gitignore`.
+- **Qué leés:** los logs de Actions son públicos, así que el workflow corre con `--quiet`, que imprime solo ids de documento y conteos, nunca títulos ni URLs.
+- **Inactividad:** GitHub desactiva los cron de repos públicos tras 60 días sin actividad. Se reactivan desde la pestaña *Actions*.
+- **Key de Gemini:** restringila a la Generative Language API y no le actives facturación.
 
 ## Proveedores
 

@@ -39,10 +39,11 @@ export async function translateDocument(
 ): Promise<PipelineResult> {
   const lang = opts.targetLang;
   if (!doc.html_content?.trim()) {
-    throw new SkipError(`"${doc.title}" no tiene html_content (los PDF/EPUB no exponen HTML por la API)`);
+    // Los mensajes no incluyen el título: el CLI ya lo imprime (o no, en --quiet).
+    throw new SkipError(`sin html_content (${doc.category}; los PDF/EPUB no exponen HTML por la API)`);
   }
   if (tagNames(doc).includes(translationTag(lang))) {
-    throw new SkipError(`"${doc.title}" ya es una traducción`);
+    throw new SkipError("ya es una traducción");
   }
 
   const body = await translateHtml(provider, doc.html_content, {

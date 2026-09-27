@@ -1,5 +1,9 @@
 # Traduce cada hora los documentos de Reader con el tag "translate".
 # Secrets requeridos en el repo: READWISE_TOKEN, LLM_API_KEY (o ANTHROPIC_API_KEY).
+#
+# El repo es público y los logs de Actions también: por eso corre con --quiet,
+# que imprime solo ids y conteos (nunca títulos ni URLs de lo que leés).
+# Los secrets nunca se imprimen: GitHub los enmascara con *** aunque aparecieran.
 name: translate-reader
 
 on:
@@ -22,7 +26,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run translate -- --tag
+      - run: npm run translate -- --tag --quiet
         env:
           READWISE_TOKEN: ${{ secrets.READWISE_TOKEN }}
           PROVIDER: openai-compatible
