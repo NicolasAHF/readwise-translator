@@ -9,11 +9,19 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { loadConfig, parseOriginalAction } from "./config.js";
-import { SkipError, translateDocument } from "./pipeline.js";
+import { IncompleteTranslationError, SkipError, translateDocument } from "./pipeline.js";
 import { createProvider, QuotaExhaustedError } from "./providers.js";
 import { parseDocumentId, ReadwiseClient, type ReaderDocument } from "./readwise.js";
 import { estimateRequests } from "./translator.js";
-import { docLabel, originalLabel, savedLabel } from "./output.js";
+import {
+  docLabel,
+  exitCodeFor,
+  githubAnnotation,
+  originalLabel,
+  savedLabel,
+  summaryLine,
+  type RunSummary,
+} from "./output.js";
 
 async function main(): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -63,9 +71,14 @@ async function main(): Promise<number> {
   }
 
   console.log(`Proveedor: ${provider.name} → ${targetLang}${dryRun ? " (dry-run)" : ""}\n`);
-  let failures = 0;
+  const summary: RunSummary = { translated: 0, skipped: 0, incomplete: 0, errors: 0 };
+  const warn = (msg: string) => {
+    console.warn(`  ⚠ ${msg}\n`);
+    const annotation = githubAnnotation("warning", msg);
+    if (annotation) console.log(annotation);
+  };
 
-  for (const doc of docs) {
+  for (const [index, doc] of docs.entries()) {
     const requests = doc.html_content ? estimateRequests(doc.html_content, config.chunkChars) + 1 : 0;
     console.log(`▶ ${docLabel(doc, quiet)}  (~${requests} requests al LLM)`);
     const started = Date.now();
@@ -84,34 +97,42 @@ async function main(): Promise<number> {
       if (!quiet) process.stdout.write("\n");
 
       const secs = ((Date.now() - started) / 1000).toFixed(1);
-      const warn = result.failedChunks ? ` ⚠ ${result.failedChunks} chunk(s) quedaron sin traducir` : "";
       if (dryRun) {
         await mkdir("out", { recursive: true });
         const path = `out/${doc.id}.${targetLang}.html`;
         await writeFile(path, `<!doctype html><meta charset="utf-8"><title>${result.title}</title>\n${result.html}`);
-        console.log(`  ✓ ${quiet ? "" : result.title + " "}→ ${path} (${secs}s)${warn}\n`);
+        const partial = result.failedChunks ? ` ⚠ ${result.failedChunks} chunk(s) sin traducir` : "";
+        console.log(`  ✓ ${quiet ? "" : result.title + " "}→ ${path} (${secs}s)${partial}\n`);
       } else {
-        console.log(`  ✓ ${savedLabel(result, quiet)} (${secs}s)${warn}`);
+        console.log(`  ✓ ${savedLabel(result, quiet)} (${secs}s)`);
         console.log(`  ${originalLabel(result.original)}\n`);
       }
+      summary.translated++;
     } catch (err) {
       if (!quiet) process.stdout.write("\n");
       if (err instanceof SkipError) {
+        summary.skipped++;
         console.log(`  ↷ salteado: ${err.message}\n`);
+      } else if (err instanceof IncompleteTranslationError) {
+        // Nada guardado, original intacto: sigue con el próximo artículo.
+        summary.incomplete++;
+        warn(`${docLabel(doc, true)}: ${err.message}`);
       } else if (err instanceof QuotaExhaustedError) {
-        // No se guardó nada: el original sigue intacto y con el tag, se reintenta en otra corrida.
-        const pending = docs.length - docs.indexOf(doc);
-        console.error(`  ✗ ${err.message}`);
-        console.error(`  Se corta acá: ${pending} documento(s) quedan con el tag para la próxima corrida.\n`);
-        return 1;
+        // Sin cuota no tiene sentido seguir; lo pendiente conserva el tag para otra corrida.
+        summary.quotaStoppedWithPending = docs.length - index;
+        warn(`${err.message}. Se corta acá: ${summary.quotaStoppedWithPending} documento(s) quedan para la próxima corrida.`);
+        break;
       } else {
-        failures++;
+        summary.errors++;
         console.error(`  ✗ ${(err as Error).message}\n`);
+        const annotation = githubAnnotation("error", `${docLabel(doc, true)}: ${(err as Error).message}`);
+        if (annotation) console.log(annotation);
       }
     }
   }
 
-  return failures > 0 ? 1 : 0;
+  console.log(summaryLine(summary));
+  return exitCodeFor(summary);
 }
 
 main().then(

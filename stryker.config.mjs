@@ -36,13 +36,13 @@ export default {
   htmlReporter: { fileName: "reports/mutation/mutation.html" },
   jsonReporter: { fileName: "reports/mutation/mutation.json" },
 
-  // Historial: 68,6% (primera medición) → 84,0% (tests para los huecos detectados).
-  // break justo debajo del score actual para detectar regresiones; subilo cuando mejore.
+  // Historial: 68,6% (primera medición) → 84,0% → 91,6% (todos los archivos ≥ 80%).
+  // break es sobre el TOTAL; el piso por archivo (80%) lo aplica scripts/mutation-summary.mjs.
   thresholds: {
     high: 90,
-    low: 80,
+    low: 85,
     // Por debajo de esto `stryker run` sale con error (y el workflow falla).
-    break: 80,
+    break: 88,
   },
 
   // Los tests del RateLimiter y los reintentos usan timers: margen para mutantes lentos.

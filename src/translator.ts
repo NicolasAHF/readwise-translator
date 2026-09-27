@@ -35,6 +35,8 @@ export interface TranslateResult {
   translatedChunks: number;
   /** Índices de chunks que quedaron sin traducir tras agotar reintentos. */
   failedChunks: number[];
+  /** Hubo fallas y todas fueron pasajeras (red/cuota), no respuestas inválidas del modelo. */
+  onlyTransientFailures: boolean;
 }
 
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -104,7 +106,16 @@ const MAX_SPLIT_DEPTH = 3;
 /** Por debajo de este tamaño no se parte más: se reintenta normal. */
 const MIN_SPLIT_CHARS = 1_000;
 
-type ChunkResult = { html: string; ok: boolean; lastProblem?: string };
+export interface ChunkResult {
+  html: string;
+  ok: boolean;
+  lastProblem?: string;
+  /**
+   * El último intento falló por la request (red, 5xx, 429 que no se resolvió) y no porque
+   * el modelo devolviera algo inválido. Es pasajero: reintentar más tarde tiene sentido.
+   */
+  transient?: boolean;
+}
 
 export async function translateChunk(
   provider: LlmProvider,
@@ -115,6 +126,7 @@ export async function translateChunk(
   depth = 0,
 ): Promise<ChunkResult> {
   let lastProblem: string | undefined;
+  let transient = false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const user = lastProblem
       ? `${chunk.html}\n\n<!-- Your previous attempt was rejected because ${lastProblem}. Follow the rules strictly. -->`
@@ -130,14 +142,16 @@ export async function translateChunk(
       const check = validateTranslation(chunk, res.text, res.truncated);
       if (check.ok) return { html: check.html, ok: true };
       lastProblem = check.problem;
+      transient = false;
     } catch (err) {
       // Sin cuota no tiene sentido seguir con este ni con ningún otro chunk.
       if (err instanceof QuotaExhaustedError) throw err;
       lastProblem = `a request error occurred (${(err as Error).message})`;
+      transient = true;
     }
     console.warn(`  intento ${attempt}/${maxAttempts} rechazado: ${lastProblem}`);
   }
-  return { html: chunk.html, ok: false, lastProblem };
+  return { html: chunk.html, ok: false, lastProblem, transient };
 }
 
 /**
@@ -156,18 +170,15 @@ async function translateSplit(
 ): Promise<ChunkResult | null> {
   if (chunk.html.length < MIN_SPLIT_CHARS * 2) return null;
   const { chunks: parts, kept } = chunkHtml(chunk.html, Math.floor(chunk.html.length / 2));
-  const translatable = parts.filter((p) => !isPlaceholderOnly(p.html)).length;
-  if (translatable < 2) return null;
+  // chunkHtml nunca produce una parte sin texto si el chunk tiene texto (los "keep" se
+  // pegan al chunk en curso), así que todas las partes van al modelo.
+  if (parts.length < 2) return null;
 
-  console.warn(`  respuesta cortada por tokens: el chunk se parte en ${translatable}`);
+  console.warn(`  respuesta cortada por tokens: el chunk se parte en ${parts.length}`);
   const out: string[] = [];
   for (const part of parts) {
-    if (isPlaceholderOnly(part.html)) {
-      out.push(part.html);
-      continue;
-    }
     const r = await translateChunk(provider, part, system, maxAttempts, limiter, depth + 1);
-    if (!r.ok) return { html: chunk.html, ok: false, lastProblem: r.lastProblem };
+    if (!r.ok) return { html: chunk.html, ok: false, lastProblem: r.lastProblem, transient: r.transient };
     out.push(r.html);
   }
   const check = validateTranslation(chunk, restorePlaceholders(out.join(""), kept), false);
@@ -190,11 +201,15 @@ export async function translateHtml(
   const toTranslate = chunks.filter((c) => !isPlaceholderOnly(c.html)).length;
   let done = 0;
   const failed: number[] = [];
+  let permanentFailure = false;
 
   const results = await mapWithConcurrency(chunks, opts.concurrency, async (chunk, i) => {
     if (isPlaceholderOnly(chunk.html)) return chunk.html;
     const r = await translateChunk(provider, chunk, system, maxAttempts, limiter);
-    if (!r.ok) failed.push(i);
+    if (!r.ok) {
+      failed.push(i);
+      if (!r.transient) permanentFailure = true;
+    }
     opts.onProgress?.(++done, toTranslate);
     return r.html;
   });
@@ -204,6 +219,8 @@ export async function translateHtml(
     totalChunks: chunks.length,
     translatedChunks: toTranslate,
     failedChunks: failed.sort((a, b) => a - b),
+    // Si falló algo y TODO lo que falló fue por la request, vale la pena reintentar después.
+    onlyTransientFailures: failed.length > 0 && !permanentFailure,
   };
 }
 

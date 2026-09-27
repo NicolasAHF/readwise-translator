@@ -23,6 +23,8 @@ export interface ReaderDocument {
   /** Nota a nivel documento. */
   notes?: string | null;
   created_at?: string;
+  /** Cuándo se guardó en Reader (ISO 8601). */
+  saved_at?: string | null;
   html_content?: string | null;
 }
 
@@ -88,7 +90,7 @@ export class ReadwiseClient {
       docs.push(...res.results.filter((d) => d.parent_id === null));
       cursor = res.nextPageCursor;
     } while (cursor);
-    return docs;
+    return oldestFirst(docs);
   }
 
   /** Crea un documento. 201 = creado, 200 = ya existía esa url. */
@@ -188,6 +190,19 @@ export function parseDocumentId(input: string): string {
   if (match?.[1]) return match[1];
   if (/^[0-9a-z]{20,}$/i.test(trimmed)) return trimmed;
   throw new Error(`No reconozco "${input}" como id o URL de Reader`);
+}
+
+/**
+ * FIFO: si entran más artículos de los que la cuota permite por día, los más viejos
+ * no quedan esperando para siempre. Ordena por saved_at (o created_at); los que no
+ * tienen fecha van al final. Estable: empates conservan el orden de la API.
+ */
+export function oldestFirst<T extends Pick<ReaderDocument, "saved_at" | "created_at">>(docs: readonly T[]): T[] {
+  const key = (d: T) => {
+    const t = Date.parse(d.saved_at ?? d.created_at ?? "");
+    return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+  };
+  return [...docs].sort((a, b) => key(a) - key(b));
 }
 
 /** Nombres (no keys) de los tags de un documento. */

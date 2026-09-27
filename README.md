@@ -59,6 +59,22 @@ Borrar en Reader es irreversible y **se lleva los highlights y notas** del docum
 
 Todo esto pasa **después** de guardar la traducción: si falla cualquier paso anterior, el original no se toca y conserva el tag para reintentarse en la próxima corrida.
 
+### ¿Qué pasa cuando algo falla?
+
+Cada artículo es **todo o nada**. Si queda aunque sea un chunk sin traducir, no se guarda nada y el original no se toca. Los demás artículos de la corrida siguen normalmente.
+
+| Situación | Qué pasa con ese artículo | Corrida |
+|---|---|---|
+| Falla pasajera (red, 5xx, 429 por minuto que no se resolvió) | Conserva el tag, sin gastar intentos | ✅ verde con aviso |
+| El modelo devuelve algo inválido (HTML roto, placeholders cambiados) | Suma un intento con el tag `translate-attempt-N` | ✅ verde con aviso |
+| 3 intentos inválidos | Pierde `translate` y gana `translate-failed`: no se reintenta más. Para volver a intentarlo, le ponés `translate` de nuevo en Reader | ✅ verde con aviso |
+| Cuota diaria del LLM agotada | La corrida se corta; lo pendiente conserva el tag | ✅ verde con aviso |
+| Error real (Readwise caído, config inválida) | Sin cambios | ❌ falla |
+
+Los avisos aparecen como anotaciones en la página del run. Solo los errores reales ponen la corrida en rojo, así GitHub no manda un mail por hora mientras la cuota está agotada.
+
+Los artículos se procesan **del más viejo al más nuevo** (`saved_at`). Si agregás más de los que entran en la cuota diaria, ninguno queda esperando para siempre.
+
 El modo `--tag` es el más cómodo: marcás artículos con `translate` desde el celular y el workflow de `.github/workflows/translate.yml` los procesa cada hora. Para eso agregá los secrets `READWISE_TOKEN` y `LLM_API_KEY` al repo.
 
 ### Correrlo desde un repo público sin exponer nada
@@ -108,6 +124,7 @@ npm run test:mutation  # Stryker, ~3 min: qué tan buenos son los tests (reports
 La cobertura dice qué líneas corren los tests; el **mutation testing** dice si los tests *notan* cuando esas líneas cambian. Stryker introduce bugs chicos en `src/` (invierte un `&&`, cambia `>` por `>=`, vacía una función…) y corre los tests contra cada uno. Si ningún test falla, el mutante "sobrevive" y eso marca un hueco.
 
 - Corre solo el 1 de cada mes y a mano desde *Actions → mutation-testing → Run workflow*. El resumen por archivo aparece en la página del run, y el detalle mutante por mutante en el artifact `mutation-report`.
-- Score actual: **84,0%** (arrancó en 68,6%). El workflow falla si baja de 80% (`thresholds.break` en `stryker.config.mjs`); subilo a medida que mejoren los tests.
+- Score actual: **91,6%** (arrancó en 68,6%), con todos los archivos por encima de 80%.
+- El workflow falla si el total baja de 88% (`thresholds.break` en `stryker.config.mjs`) **o** si cualquier archivo baja de 80% (piso por archivo en `scripts/mutation-summary.mjs`, configurable con `MUTATION_FILE_BREAK`). El piso por archivo existe porque el umbral de Stryker es sobre el promedio, y un archivo flojo puede quedar escondido.
 - Se excluyen `src/cli.ts` (entrypoint sin lógica testeable) y las mutaciones de strings (mensajes y prompt: ruido sin señal).
 - Vitest está en 4.x a propósito: el runner de Stryker 10 todavía no soporta Vitest 5. Con Vitest 5 los mutantes nunca se activan y el score da 0%.

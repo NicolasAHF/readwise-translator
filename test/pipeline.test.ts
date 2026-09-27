@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   deletionBlocker,
+  IncompleteTranslationError,
   isWebUrl,
+  MAX_FAILED_ATTEMPTS,
   SkipError,
   sourceHeader,
   translateDocument,
@@ -121,15 +123,94 @@ describe("translateDocument — guardado", () => {
     await expect(translateDocument(doc, fakeReader(), new FakeProvider(), opts)).rejects.toBeInstanceOf(SkipError);
   });
 
-  it("no guarda si falló más de la mitad y no toca el original", async () => {
-    const reader = fakeReader();
-    const provider = new FakeProvider(() => ({ text: "", truncated: false }));
-    await expect(
-      translateDocument(baseDoc, reader, provider, { ...opts, maxAttempts: 1, originalAction: "delete" }),
-    ).rejects.toThrow(/chunks fallaron/);
-    expect(reader.saveDocument).not.toHaveBeenCalled();
-    expect(reader.updateDocument).not.toHaveBeenCalled();
-    expect(reader.deleteDocument).not.toHaveBeenCalled();
+  describe("todo o nada: una traducción incompleta no se guarda", () => {
+    // Falla solo el primer chunk del cuerpo; el resto se traduce bien.
+    const failsFirstChunk = () => new FakeProvider((req, i) => ({ text: i === 0 ? "" : req.user, truncated: false }));
+    const withTags = (...names: string[]) => ({ ...baseDoc, tags: Object.fromEntries(names.map((n) => [n, { name: n }])) });
+    const run = (doc: ReaderDocument, reader: ReturnType<typeof fakeReader>, provider = failsFirstChunk(), extra = {}) =>
+      translateDocument(doc, reader, provider, { ...opts, maxAttempts: 1, originalAction: "delete", ...extra }).catch((e: unknown) => e);
+
+    it("no guarda, no borra ni archiva; registra el intento 1 y conserva el tag", async () => {
+      const reader = fakeReader();
+      const err = await run(baseDoc, reader);
+
+      expect(err).toBeInstanceOf(IncompleteTranslationError);
+      expect((err as IncompleteTranslationError).info).toMatchObject({ failedChunks: 1, transient: false, attempt: 1, gaveUp: false });
+      expect(reader.saveDocument).not.toHaveBeenCalled();
+      expect(reader.deleteDocument).not.toHaveBeenCalled();
+      expect(reader.updateDocument).toHaveBeenCalledExactlyOnceWith(baseDoc.id, {
+        tags: ["system-design", "translate", "translate-attempt-1"],
+      });
+    });
+
+    it("el segundo intento reemplaza el contador", async () => {
+      const reader = fakeReader();
+      const err = await run(withTags("system-design", "translate", "translate-attempt-1"), reader);
+      expect((err as IncompleteTranslationError).info.attempt).toBe(2);
+      expect(reader.updateDocument).toHaveBeenCalledWith(baseDoc.id, { tags: ["system-design", "translate", "translate-attempt-2"] });
+    });
+
+    it(`al intento ${MAX_FAILED_ATTEMPTS} se rinde: saca el tag disparador y marca translate-failed`, async () => {
+      const reader = fakeReader();
+      const err = await run(withTags("system-design", "translate", `translate-attempt-${MAX_FAILED_ATTEMPTS - 1}`), reader);
+      expect((err as IncompleteTranslationError).info).toMatchObject({ attempt: MAX_FAILED_ATTEMPTS, gaveUp: true });
+      expect((err as Error).message).toMatch(/no se reintenta más/);
+      expect(reader.updateDocument).toHaveBeenCalledWith(baseDoc.id, { tags: ["system-design", "translate-failed"] });
+    });
+
+    it("una falla pasajera (red/5xx) no gasta intentos ni toca tags", async () => {
+      const reader = fakeReader();
+      const provider = new FakeProvider((req, i) => {
+        if (i === 0) throw new Error("ECONNRESET");
+        return { text: req.user, truncated: false };
+      });
+      const err = await run(baseDoc, reader, provider);
+      expect((err as IncompleteTranslationError).info).toMatchObject({ transient: true, gaveUp: false });
+      expect((err as IncompleteTranslationError).info.attempt).toBeUndefined();
+      expect((err as Error).message).toMatch(/próxima corrida/);
+      expect(reader.updateDocument).not.toHaveBeenCalled();
+      expect(reader.saveDocument).not.toHaveBeenCalled();
+    });
+
+    it("si falla uno por red y otro por respuesta inválida, cuenta como intento", async () => {
+      const reader = fakeReader();
+      const provider = new FakeProvider((req, i) => {
+        if (i === 0) throw new Error("ECONNRESET");
+        if (i === 1) return { text: "", truncated: false };
+        return { text: req.user, truncated: false };
+      });
+      const err = await run(baseDoc, reader, provider);
+      expect((err as IncompleteTranslationError).info).toMatchObject({ failedChunks: 2, transient: false, attempt: 1 });
+    });
+
+    it("modo id (sin tag disparador): tampoco guarda, y no toca tags", async () => {
+      const reader = fakeReader();
+      const err = await run(baseDoc, reader, failsFirstChunk(), { triggerTag: undefined });
+      expect(err).toBeInstanceOf(IncompleteTranslationError);
+      expect(reader.updateDocument).not.toHaveBeenCalled();
+      expect(reader.saveDocument).not.toHaveBeenCalled();
+    });
+
+    it("el mensaje nunca incluye el título (logs públicos)", async () => {
+      const err = await run(baseDoc, fakeReader());
+      expect((err as Error).message).not.toContain(baseDoc.title);
+      expect((err as Error).message).toMatch(/^1\/\d+ chunk\(s\) sin traducir; no se guardó nada \(intento 1\/3\)$/);
+    });
+
+    it("cuando por fin sale bien, limpia los contadores del original y de la traducción", async () => {
+      const reader = fakeReader();
+      const res = await translateDocument(withTags("system-design", "translate", "translate-attempt-2"), reader, new FakeProvider(), { ...opts, originalAction: "archive" });
+      expect(res.original).toEqual({ action: "archived" });
+      expect(reader.saveDocument.mock.calls[0]![0].tags).toEqual(["system-design", "translation-es"]);
+      expect(reader.updateDocument).toHaveBeenCalledWith(baseDoc.id, { tags: ["system-design"], location: "archive" });
+    });
+
+    it("dry-run devuelve la vista previa aunque esté incompleta, sin tocar nada", async () => {
+      const reader = fakeReader();
+      const res = await translateDocument(baseDoc, reader, failsFirstChunk(), { ...opts, maxAttempts: 1, dryRun: true });
+      expect(res.failedChunks).toBe(1);
+      for (const fn of Object.values(reader)) expect(fn).not.toHaveBeenCalled();
+    });
   });
 
   it("si Reader falla al guardar, el original queda intacto", async () => {
@@ -203,16 +284,6 @@ describe("translateDocument — qué pasa con el original", () => {
     expect(reader.updateDocument).toHaveBeenCalledWith(baseDoc.id, { tags: ["system-design"], location: "archive" });
   });
 
-  it("delete → archiva si algún chunk quedó sin traducir", async () => {
-    const reader = fakeReader();
-    // Falla solo el primer chunk del cuerpo (1 de varios): se guarda, pero incompleto.
-    const provider = new FakeProvider((req, i) => ({ text: i === 0 ? "" : req.user, truncated: false }));
-    const res = await translateDocument(baseDoc, reader, provider, { ...opts, maxAttempts: 1, originalAction: "delete" });
-    expect(res.failedChunks).toBe(1);
-    expect(res.original).toMatchObject({ action: "archived", reason: expect.stringMatching(/incompleta/) });
-    expect(reader.deleteDocument).not.toHaveBeenCalled();
-  });
-
   it("delete → archiva si no puede verificar la traducción guardada", async () => {
     const reader = fakeReader();
     reader.getDocument.mockResolvedValueOnce(null);
@@ -230,7 +301,7 @@ describe("translateDocument — qué pasa con el original", () => {
   it("los motivos nunca incluyen el título (logs públicos)", async () => {
     const reader = fakeReader();
     for (const highlights of [true, "unknown"] as const) {
-      const r = await deletionBlocker(baseDoc, { ...reader, hasHighlights: async () => highlights }, { failedChunks: 0, saved: { id: "n", url: "", alreadyExisted: false } });
+      const r = await deletionBlocker(baseDoc, { ...reader, hasHighlights: async () => highlights }, { saved: { id: "n", url: "", alreadyExisted: false } });
       expect(r).not.toContain(baseDoc.title);
     }
   });

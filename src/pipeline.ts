@@ -46,6 +46,50 @@ export class SkipError extends Error {
   }
 }
 
+/** Intentos fallidos por respuestas inválidas del modelo antes de rendirse con un artículo. */
+export const MAX_FAILED_ATTEMPTS = 3;
+
+export interface IncompleteInfo {
+  failedChunks: number;
+  totalChunks: number;
+  /** Todas las fallas fueron pasajeras (red/cuota): no cuentan como intento. */
+  transient: boolean;
+  /** Intento registrado (solo modo --tag y fallas no pasajeras). */
+  attempt?: number;
+  /** Se agotaron los intentos: se le sacó el tag disparador y se marcó como fallido. */
+  gaveUp: boolean;
+}
+
+/**
+ * La traducción quedó incompleta: NO se guardó nada y el original sigue intacto
+ * (salvo los tags de conteo de intentos). No es un error del programa sino un
+ * resultado esperable, por eso el CLI lo reporta como aviso.
+ */
+export class IncompleteTranslationError extends Error {
+  constructor(readonly info: IncompleteInfo) {
+    super(describeIncomplete(info));
+    this.name = "IncompleteTranslationError";
+  }
+}
+
+function describeIncomplete(i: IncompleteInfo): string {
+  const base = `${i.failedChunks}/${i.totalChunks} chunk(s) sin traducir; no se guardó nada`;
+  if (i.transient) return `${base} (falla pasajera: se reintenta en la próxima corrida)`;
+  if (i.gaveUp) return `${base}; ${MAX_FAILED_ATTEMPTS} intentos fallidos: se marcó como fallido y no se reintenta más`;
+  if (i.attempt) return `${base} (intento ${i.attempt}/${MAX_FAILED_ATTEMPTS})`;
+  return base;
+}
+
+/** Tags auxiliares derivados del tag disparador (ej. "translate-attempt-2", "translate-failed"). */
+export const attemptTag = (trigger: string, n: number) => `${trigger}-attempt-${n}`;
+export const failedTag = (trigger: string) => `${trigger}-failed`;
+const isAttemptTag = (trigger: string, tag: string) => tag.startsWith(`${trigger}-attempt-`);
+
+/** Tags del original sin el disparador ni los de conteo de intentos. */
+function cleanTags(doc: ReaderDocument, trigger?: string): string[] {
+  return tagNames(doc).filter((t) => !trigger || (t !== trigger && !isAttemptTag(trigger, t)));
+}
+
 export async function translateDocument(
   doc: ReaderDocument,
   reader: ReaderPort,
@@ -76,15 +120,18 @@ export async function translateDocument(
   };
   if (opts.dryRun) return result;
 
-  // Si más de la mitad falló, no vale la pena guardar un documento mayormente sin traducir.
-  if (body.translatedChunks > 0 && body.failedChunks.length > body.translatedChunks / 2) {
-    throw new Error(
-      `${body.failedChunks.length}/${body.translatedChunks} chunks fallaron; no se guarda. ` +
-        "Probá con otro modelo o bajá CHUNK_CHARS.",
+  // Todo o nada: una traducción a medias no se guarda ni toca el original.
+  if (body.failedChunks.length > 0) {
+    throw new IncompleteTranslationError(
+      await recordFailedAttempt(doc, reader, opts, {
+        failedChunks: body.failedChunks.length,
+        totalChunks: body.translatedChunks,
+        transient: body.onlyTransientFailures,
+      }),
     );
   }
 
-  const originalTags = tagNames(doc).filter((t) => t !== opts.triggerTag);
+  const originalTags = cleanTags(doc, opts.triggerTag);
   result.saved = await reader.saveDocument({
     url: translatedUrl(doc, lang),
     html: result.html,
@@ -102,6 +149,38 @@ export async function translateDocument(
   // el original queda intacto (y con el tag, así se reintenta en la próxima corrida).
   result.original = await handleOriginal(doc, reader, result, originalTags, opts);
   return result;
+}
+
+/**
+ * Cuenta intentos fallidos con tags en el propio original, así el estado vive en Reader
+ * (no hace falta base de datos) y se ve desde la app. Solo en modo --tag y solo para
+ * fallas del modelo: las pasajeras (cuota, red) no gastan intentos.
+ */
+async function recordFailedAttempt(
+  doc: ReaderDocument,
+  reader: Pick<ReaderPort, "updateDocument">,
+  opts: PipelineOptions,
+  base: Omit<IncompleteInfo, "gaveUp" | "attempt">,
+): Promise<IncompleteInfo> {
+  const trigger = opts.triggerTag;
+  if (base.transient || !trigger || !tagNames(doc).includes(trigger)) return { ...base, gaveUp: false };
+
+  const previous = Math.max(
+    0,
+    ...tagNames(doc)
+      .filter((t) => isAttemptTag(trigger, t))
+      .map((t) => Number(t.slice(`${trigger}-attempt-`.length)))
+      .filter(Number.isInteger),
+  );
+  const attempt = previous + 1;
+  const rest = cleanTags(doc, trigger);
+
+  if (attempt >= MAX_FAILED_ATTEMPTS) {
+    await reader.updateDocument(doc.id, { tags: [...rest, failedTag(trigger)] });
+    return { ...base, attempt, gaveUp: true };
+  }
+  await reader.updateDocument(doc.id, { tags: [...rest, trigger, attemptTag(trigger, attempt)] });
+  return { ...base, attempt, gaveUp: false };
 }
 
 async function handleOriginal(
@@ -140,9 +219,9 @@ async function handleOriginal(
 export async function deletionBlocker(
   doc: ReaderDocument,
   reader: Pick<ReaderPort, "getDocument" | "hasHighlights">,
-  result: Pick<PipelineResult, "failedChunks" | "saved">,
+  result: Pick<PipelineResult, "saved">,
 ): Promise<string | null> {
-  if (result.failedChunks > 0) return "la traducción quedó incompleta";
+  // (Una traducción incompleta ni siquiera llega acá: no se guarda.)
   if (!isWebUrl(doc.source_url)) return "no tiene URL web de origen (el link no llevaría a ningún lado)";
   if (doc.notes?.trim()) return "tiene una nota";
   if (!result.saved || !(await reader.getDocument(result.saved.id))) return "no pude verificar la traducción guardada";

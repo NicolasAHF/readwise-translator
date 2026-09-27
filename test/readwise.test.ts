@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { OpenAICompatibleProvider, parseApiError, QuotaExhaustedError, REASONING_HEADROOM_TOKENS } from "../src/providers.js";
-import { parseDocumentId, ReadwiseApiError, ReadwiseClient, tagNames } from "../src/readwise.js";
+import { oldestFirst, parseDocumentId, ReadwiseApiError, ReadwiseClient, tagNames } from "../src/readwise.js";
 
 const ID = "01k5xyzabcdefghijklmnopqrs";
 
@@ -268,5 +268,33 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ READWISE_TOKEN: "t", LLM_MODEL: "m", CONCURRENCY: "0" })).toThrow(/CONCURRENCY/);
     expect(loadConfig({ READWISE_TOKEN: "t", LLM_MODEL: "m", LLM_REASONING_EFFORT: "low" }).provider).toMatchObject({ reasoningEffort: "low" });
     expect(() => loadConfig({ READWISE_TOKEN: "t", LLM_MODEL: "m", LLM_REASONING_EFFORT: "zero" })).toThrow(/LLM_REASONING_EFFORT/);
+  });
+});
+
+describe("oldestFirst (FIFO)", () => {
+  it("ordena por saved_at, cae a created_at, y deja al final los sin fecha", () => {
+    const docs = [
+      { id: "nuevo", saved_at: "2026-09-27T10:00:00Z" },
+      { id: "sin-fecha", saved_at: null },
+      { id: "viejo", saved_at: "2026-09-01T10:00:00Z" },
+      { id: "solo-created", saved_at: null, created_at: "2026-09-10T10:00:00Z" },
+    ];
+    expect(oldestFirst(docs).map((d) => d.id)).toEqual(["viejo", "solo-created", "nuevo", "sin-fecha"]);
+    expect(docs[0]!.id).toBe("nuevo"); // no muta el array original
+  });
+
+  it("listByTag devuelve los documentos del más viejo al más nuevo", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      results: [
+        { id: "b", parent_id: null, saved_at: "2026-09-20T00:00:00Z" },
+        { id: "a", parent_id: null, saved_at: "2026-09-02T00:00:00Z" },
+      ],
+      nextPageCursor: null,
+    }))));
+    try {
+      expect((await new ReadwiseClient("tok").listByTag("translate")).map((d) => d.id)).toEqual(["a", "b"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

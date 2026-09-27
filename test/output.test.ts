@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { docLabel, originalLabel, savedLabel } from "../src/output.js";
+import { docLabel, exitCodeFor, githubAnnotation, originalLabel, savedLabel, summaryLine } from "../src/output.js";
 import { SkipError, translateDocument } from "../src/pipeline.js";
 import type { ReaderDocument } from "../src/readwise.js";
 import { FakeProvider } from "./fixtures.js";
@@ -52,5 +52,35 @@ describe("--quiet no filtra qué estás leyendo", () => {
       expect(err).toBeInstanceOf(SkipError);
       expect((err as Error).message).not.toContain(SECRET_TITLE);
     }
+  });
+});
+
+describe("resultado de la corrida", () => {
+  const base = { translated: 0, skipped: 0, incomplete: 0, errors: 0 };
+
+  it("solo los errores reales hacen fallar la corrida", () => {
+    expect(exitCodeFor(base)).toBe(0);
+    expect(exitCodeFor({ ...base, translated: 3, incomplete: 2, skipped: 1, quotaStoppedWithPending: 5 })).toBe(0);
+    expect(exitCodeFor({ ...base, translated: 3, errors: 1 })).toBe(1);
+  });
+
+  it("summaryLine muestra solo lo que pasó", () => {
+    expect(summaryLine({ ...base, translated: 2 })).toBe("Resumen: 2 traducido(s)");
+    expect(summaryLine({ translated: 1, skipped: 1, incomplete: 1, errors: 1, quotaStoppedWithPending: 4 })).toBe(
+      "Resumen: 1 traducido(s) · 1 incompleto(s), sin guardar · 1 salteado(s) · 1 error(es) · cuota agotada: 4 pendiente(s) para la próxima corrida",
+    );
+  });
+});
+
+describe("githubAnnotation", () => {
+  it("fuera de GitHub Actions no emite nada", () => {
+    expect(githubAnnotation("warning", "x", {})).toBeUndefined();
+    expect(githubAnnotation("warning", "x", { GITHUB_ACTIONS: "false" })).toBeUndefined();
+  });
+
+  it("en Actions emite el workflow command y escapa %, \\r y \\n", () => {
+    const env = { GITHUB_ACTIONS: "true" };
+    expect(githubAnnotation("warning", "cuota agotada", env)).toBe("::warning::cuota agotada");
+    expect(githubAnnotation("error", "100% roto\r\nlínea 2", env)).toBe("::error::100%25 roto%0D%0Alínea 2");
   });
 });

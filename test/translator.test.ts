@@ -3,6 +3,7 @@ import { chunkHtml, normalizeHtml } from "../src/html-chunker.js";
 import {
   buildSystemPrompt,
   estimateMaxTokens,
+  estimateRequests,
   mapWithConcurrency,
   RateLimiter,
   stripCodeFences,
@@ -230,5 +231,188 @@ describe("helpers", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("partir chunks cortados por tokens: límites", () => {
+  /** n párrafos de exactamente `size` chars cada uno. */
+  const paragraphs = (n: number, size: number) => `<p>${"a".repeat(size - 7)}</p>`.repeat(n);
+  const alwaysTruncated = () => new FakeProvider(() => ({ text: "<p>cort", truncated: true }));
+  const big = { ...opts, chunkChars: 100_000, concurrency: 1, maxAttempts: 1 };
+
+  it(`respeta la profundidad máxima: 20000 → 10000 → 5000 → 2500 y ahí se rinde`, async () => {
+    const provider = new FakeProvider((req) =>
+      req.user.length > 1_000 ? { text: "<p>cort", truncated: true } : { text: req.user, truncated: false },
+    );
+    const res = await translateHtml(provider, paragraphs(80, 250), big);
+    // Una llamada por nivel (0..3); al fallar la primera parte, corta sin seguir con las demás.
+    expect(provider.calls.map((c) => c.user.length)).toEqual([20_000, 10_000, 5_000, 2_500]);
+    expect(res.failedChunks).toEqual([0]);
+    expect(res.onlyTransientFailures).toBe(false);
+  });
+
+  it("un chunk grande que NO se corta va en una sola llamada (no se parte de más)", async () => {
+    const provider = new FakeProvider((req) => ({ text: req.user, truncated: false }));
+    const res = await translateHtml(provider, paragraphs(80, 250), big);
+    expect(provider.calls).toHaveLength(1);
+    expect(res.failedChunks).toEqual([]);
+  });
+
+  it("se parte a partir de exactamente 2000 chars…", async () => {
+    const provider = alwaysTruncated();
+    await translateHtml(provider, paragraphs(2, 1_000), big);
+    expect(provider.calls.map((c) => c.user.length)).toEqual([2_000, 1_000]);
+  });
+
+  it("…y por debajo no: se reintenta entero", async () => {
+    const provider = alwaysTruncated();
+    await translateHtml(provider, paragraphs(2, 999), { ...big, maxAttempts: 2 });
+    expect(provider.calls.map((c) => c.user.length)).toEqual([1_998, expect.any(Number)]);
+    expect(stripRetryNote(provider.calls[1]!.user)).toHaveLength(1_998);
+  });
+
+  it("si una parte falla por red, la falla del chunk es pasajera", async () => {
+    const provider = new FakeProvider((req, i) => {
+      if (i === 0) return { text: "", truncated: true };
+      throw new Error("ECONNRESET");
+    });
+    const res = await translateHtml(provider, paragraphs(4, 600), big);
+    expect(res.failedChunks).toEqual([0]);
+    expect(res.onlyTransientFailures).toBe(true);
+  });
+
+  it("las partes pueden pasar su validación y el conjunto no: el chunk falla igual", async () => {
+    // Cada parte pierde 2 tags <p> (tolerado para 11 tags), pero juntas pierden 4 de 22 (tolerancia 3).
+    const provider = new FakeProvider((req) =>
+      req.user.length > 1_500
+        ? { text: "", truncated: true }
+        : { text: req.user.replace("<p>", "").replace("<p>", ""), truncated: false },
+    );
+    const res = await translateHtml(provider, paragraphs(22, 100), big);
+    expect(provider.calls).toHaveLength(3);
+    expect(res.failedChunks).toEqual([0]);
+    expect(res.onlyTransientFailures).toBe(false);
+  });
+
+  it("avisa en el log cuando rechaza un intento y cuando parte un chunk", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await translateHtml(alwaysTruncated(), paragraphs(2, 1_000), big);
+      const logged = warn.mock.calls.map((c) => String(c[0]));
+      expect(logged.some((l) => /se parte en 2/.test(l))).toBe(true);
+      expect(logged.some((l) => /intento 1\/1 rechazado: the output was cut off/.test(l))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("translateHtml: orden de chunks fallidos", () => {
+  it("failedChunks sale ordenado aunque terminen en otro orden", async () => {
+    const provider = new FakeProvider(async (req) => {
+      if (req.user.includes("AAA")) {
+        await new Promise((r) => setTimeout(r, 30)); // el chunk 0 falla último
+        return { text: "", truncated: false };
+      }
+      if (req.user.includes("CCC")) return { text: "", truncated: false }; // el chunk 2 falla primero
+      return { text: req.user, truncated: false };
+    });
+    const html = ["AAA", "BBB", "CCC"].map((w) => `<p>${w} ${"x".repeat(40)}</p>`).join("");
+    const res = await translateHtml(provider, html, { ...opts, chunkChars: 60, maxAttempts: 1 });
+    expect(res.totalChunks).toBe(3);
+    expect(res.failedChunks).toEqual([0, 2]);
+  });
+});
+
+describe("conteo de tags en la validación", () => {
+  it("los placeholders no cuentan como tags (no inflan la tolerancia)", () => {
+    // 20 <p> + 30 placeholders: la tolerancia es max(2, 10% de 20) = 2, no 10% de 50.
+    const ids = Array.from({ length: 30 }, (_, i) => i);
+    const ph = ids.map((i) => `<rw-keep id="${i}"></rw-keep>`).join("");
+    const src = { html: ph + "<p>x</p>".repeat(20), placeholderIds: ids };
+    const out = ph + "x</p>".repeat(3) + "<p>x</p>".repeat(17);
+    expect(validateTranslation(src, out, false)).toMatchObject({ ok: false, problem: expect.stringContaining("structure") });
+  });
+
+  it("cuenta aperturas, no cierres", () => {
+    const src = { html: "<p>x</p>".repeat(20), placeholderIds: [] };
+    expect(validateTranslation(src, "x</p>".repeat(20), false).ok).toBe(false);
+  });
+
+  it("distingue 'reordenados' de 'faltantes' aunque el origen no esté en orden ascendente", () => {
+    const src = { html: '<rw-keep id="7"></rw-keep><p>t</p><rw-keep id="3"></rw-keep>', placeholderIds: [7, 3] };
+    const res = validateTranslation(src, '<rw-keep id="3"></rw-keep><p>t</p><rw-keep id="7"></rw-keep>', false);
+    expect(res.problem).toContain("reordered");
+  });
+});
+
+describe("stripCodeFences: solo fences que envuelven TODA la respuesta", () => {
+  it.each([
+    ["  ```html\n<p>x</p>\n```  ", "<p>x</p>"], //         espacios alrededor
+    ["```html \n<p>x</p>\n```", "<p>x</p>"], //            espacio después del lenguaje
+    ["intro\n```html\n<p>x</p>\n```", "intro\n```html\n<p>x</p>\n```"], // texto antes: no se toca
+    ["```html\n<p>x</p>\n```\nfin", "```html\n<p>x</p>\n```\nfin"], //   texto después: no se toca
+  ])("%j → %j", (input, expected) => expect(stripCodeFences(input)).toBe(expected));
+});
+
+describe("RateLimiter: bordes", () => {
+  it("la primera request no espera nada", async () => {
+    vi.useFakeTimers();
+    try {
+      const limiter = new RateLimiter(10);
+      let done = false;
+      void limiter.acquire().then(() => (done = true));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sin tope (0) nunca espera, por muchas requests que sean", async () => {
+    vi.useFakeTimers();
+    try {
+      const limiter = new RateLimiter(0);
+      let done = 0;
+      for (let i = 0; i < 5; i++) void limiter.acquire().then(() => done++);
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      expect(done).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("60 RPM espacia exactamente 1s (no más)", async () => {
+    vi.useFakeTimers();
+    try {
+      const limiter = new RateLimiter(60);
+      const starts: number[] = [];
+      const all = Promise.all([0, 1].map(async () => { await limiter.acquire(); starts.push(Date.now()); }));
+      await vi.runAllTimersAsync();
+      await all;
+      expect(starts[1]! - starts[0]!).toBe(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("helpers de translator", () => {
+  it("estimateRequests cuenta solo los chunks con texto", async () => {
+    const provider = new FakeProvider();
+    const res = await translateHtml(provider, ARTICLE, opts);
+    expect(estimateRequests(ARTICLE, opts.chunkChars)).toBe(res.translatedChunks);
+    expect(estimateRequests("<pre>solo código</pre>", 1_000)).toBe(0);
+  });
+
+  it("el prompt sin título no agrega la línea de contexto", () => {
+    const p = buildSystemPrompt("es");
+    expect(p).not.toContain("Context");
+    expect(p.endsWith("do not complete, summarize or add anything.")).toBe(true);
+  });
+
+  it("un código de idioma inválido se usa tal cual en el prompt", () => {
+    expect(buildSystemPrompt("zz-!!")).toContain("into zz-!!.");
   });
 });
