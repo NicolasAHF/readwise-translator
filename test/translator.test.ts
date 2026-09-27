@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { chunkHtml, normalizeHtml } from "../src/html-chunker.js";
 import {
   buildSystemPrompt,
+  describePlaceholderDiff,
   estimateMaxTokens,
   estimateRequests,
   mapWithConcurrency,
@@ -300,7 +301,7 @@ describe("partir chunks cortados por tokens: límites", () => {
       await translateHtml(alwaysTruncated(), paragraphs(2, 1_000), big);
       const logged = warn.mock.calls.map((c) => String(c[0]));
       expect(logged.some((l) => /se parte en 2/.test(l))).toBe(true);
-      expect(logged.some((l) => /intento 1\/1 rechazado: the output was cut off/.test(l))).toBe(true);
+      expect(logged.some((l) => /chunk rechazado \(1\/1, se da por fallido\): the output was cut off/.test(l))).toBe(true);
     } finally {
       warn.mockRestore();
     }
@@ -414,5 +415,36 @@ describe("helpers de translator", () => {
 
   it("un código de idioma inválido se usa tal cual en el prompt", () => {
     expect(buildSystemPrompt("zz-!!")).toContain("into zz-!!.");
+  });
+});
+
+describe("describePlaceholderDiff: solo lo que cambió", () => {
+  it("el caso real del log: el modelo se comió el último placeholder", () => {
+    const expected = Array.from({ length: 30 }, (_, i) => i);
+    expect(describePlaceholderDiff(expected, expected.slice(0, 29))).toBe("missing ids [29]");
+  });
+
+  it("reporta faltantes, duplicados e inesperados", () => {
+    expect(describePlaceholderDiff([1, 2, 3], [1, 1, 3, 9])).toBe("missing ids [2]; duplicated ids [1]; unexpected ids [9]");
+  });
+
+  it("el mensaje de validación usa la diferencia, no las listas completas", () => {
+    const ids = Array.from({ length: 16 }, (_, i) => i + 79);
+    const html = ids.map((i) => `<rw-keep id="${i}"></rw-keep><p>t</p>`).join("");
+    const res = validateTranslation({ html, placeholderIds: ids }, html.replace('<rw-keep id="94"></rw-keep>', ""), false);
+    expect(res.problem).toBe("the rw-keep placeholders do not match (missing ids [94])");
+  });
+
+  it("el log distingue 'se reintenta' de 'se da por fallido'", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await translateHtml(new FakeProvider(() => ({ text: "", truncated: false })), "<p>the text</p>", { ...opts, maxAttempts: 2 });
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        "  chunk rechazado (1/2, se reintenta): the output was empty",
+        "  chunk rechazado (2/2, se da por fallido): the output was empty",
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -82,7 +82,7 @@ export function validateTranslation(source: Chunk, raw: string, truncated: boole
       html,
       problem: sameSet
         ? `the rw-keep placeholders were reordered (expected order [${expected}], got [${got}])`
-        : `the rw-keep placeholders do not match (expected ids [${expected}], got [${got}])`,
+        : `the rw-keep placeholders do not match (${describePlaceholderDiff(expected, got)})`,
     };
   }
 
@@ -117,6 +117,31 @@ export interface ChunkResult {
   transient?: boolean;
 }
 
+/**
+ * Solo la diferencia, no las listas completas: un chunk puede tener decenas de
+ * placeholders y "falta el 29" es lo que sirve, tanto en el log como en el feedback
+ * que recibe el modelo al reintentar.
+ */
+export function describePlaceholderDiff(expected: readonly number[], got: readonly number[]): string {
+  const remaining = new Map<number, number>();
+  for (const id of expected) remaining.set(id, (remaining.get(id) ?? 0) + 1);
+  const unexpected: number[] = [];
+  const duplicated: number[] = [];
+  for (const id of got) {
+    const left = remaining.get(id) ?? 0;
+    if (left > 0) remaining.set(id, left - 1);
+    else if (expected.includes(id)) duplicated.push(id);
+    else unexpected.push(id);
+  }
+  const missing = [...remaining].flatMap(([id, n]) => Array<number>(n).fill(id));
+  const parts = [
+    missing.length ? `missing ids [${missing}]` : "",
+    duplicated.length ? `duplicated ids [${duplicated}]` : "",
+    unexpected.length ? `unexpected ids [${unexpected}]` : "",
+  ].filter(Boolean);
+  return parts.join("; ");
+}
+
 export async function translateChunk(
   provider: LlmProvider,
   chunk: Chunk,
@@ -149,7 +174,10 @@ export async function translateChunk(
       lastProblem = `a request error occurred (${(err as Error).message})`;
       transient = true;
     }
-    console.warn(`  intento ${attempt}/${maxAttempts} rechazado: ${lastProblem}`);
+    // "chunk" y no "intento" a secas: estos reintentos son dentro de la corrida y no
+    // tienen nada que ver con los intentos del artículo (translate-attempt-N).
+    const next = attempt < maxAttempts ? "se reintenta" : "se da por fallido";
+    console.warn(`  chunk rechazado (${attempt}/${maxAttempts}, ${next}): ${lastProblem}`);
   }
   return { html: chunk.html, ok: false, lastProblem, transient };
 }
