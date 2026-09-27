@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
-import { OpenAICompatibleProvider } from "../src/providers.js";
+import { OpenAICompatibleProvider, REASONING_HEADROOM_TOKENS } from "../src/providers.js";
 import { parseDocumentId, ReadwiseApiError, ReadwiseClient } from "../src/readwise.js";
 
 const ID = "01k5xyzabcdefghijklmnopqrs";
@@ -92,6 +92,24 @@ describe("OpenAICompatibleProvider", () => {
     expect(JSON.parse(init.body)).toMatchObject({ model: "llama", max_tokens: 100, messages: [{ role: "system" }, { role: "user" }] });
   });
 
+  it("con reasoning_effort lo manda y suma margen de tokens para el razonamiento", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "x" } }] })));
+    const p = new OpenAICompatibleProvider("https://g.example/v1", "k", "gemini", fetchMock, "low");
+    await p.complete({ system: "", user: "", maxTokens: 1_000 });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({
+      reasoning_effort: "low",
+      max_tokens: 1_000 + REASONING_HEADROOM_TOKENS,
+    });
+  });
+
+  it("sin reasoning_effort no manda el campo ni suma margen", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "x" } }] })));
+    await new OpenAICompatibleProvider("https://g.example/v1", "k", "llama", fetchMock).complete({ system: "", user: "", maxTokens: 1_000 });
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(body.max_tokens).toBe(1_000);
+  });
+
   it("no manda Authorization si no hay key (Ollama)", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "x" } }] })));
     await new OpenAICompatibleProvider("http://localhost:11434/v1", "", "qwen", fetchMock).complete({ system: "", user: "", maxTokens: 1 });
@@ -108,5 +126,7 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ LLM_MODEL: "m" })).toThrow(/READWISE_TOKEN/);
     expect(() => loadConfig({ READWISE_TOKEN: "t", PROVIDER: "anthropic" })).toThrow(/ANTHROPIC_API_KEY/);
     expect(() => loadConfig({ READWISE_TOKEN: "t", LLM_MODEL: "m", CONCURRENCY: "0" })).toThrow(/CONCURRENCY/);
+    expect(loadConfig({ READWISE_TOKEN: "t", LLM_MODEL: "m", LLM_REASONING_EFFORT: "low" }).provider).toMatchObject({ reasoningEffort: "low" });
+    expect(() => loadConfig({ READWISE_TOKEN: "t", LLM_MODEL: "m", LLM_REASONING_EFFORT: "zero" })).toThrow(/LLM_REASONING_EFFORT/);
   });
 });

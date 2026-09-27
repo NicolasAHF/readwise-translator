@@ -33,7 +33,11 @@ jobs:
           LLM_BASE_URL: https://generativelanguage.googleapis.com/v1beta/openai
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_MODEL: gemini-flash-latest
-          REQUESTS_PER_MINUTE: "8"
+          # Gemini 3 siempre razona; "low" lo minimiza y suma margen de tokens para que no se corte.
+          LLM_REASONING_EFFORT: low
+          # Free tier: de a un chunk, con margen bajo el límite de RPM (menos 429/503).
+          CONCURRENCY: "1"
+          REQUESTS_PER_MINUTE: "5"
           TARGET_LANG: es
           # Borra el original y deja un link a la fuente en la traducción.
           # Si el original tiene highlights o nota (o algo no cierra), lo archiva en vez de borrarlo.

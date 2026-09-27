@@ -94,13 +94,21 @@ export function validateTranslation(source: Chunk, raw: string, truncated: boole
   return { ok: true, html };
 }
 
+/** Cuántas veces se puede partir un chunk que el modelo corta por límite de tokens. */
+const MAX_SPLIT_DEPTH = 3;
+/** Por debajo de este tamaño no se parte más: se reintenta normal. */
+const MIN_SPLIT_CHARS = 1_000;
+
+type ChunkResult = { html: string; ok: boolean; lastProblem?: string };
+
 export async function translateChunk(
   provider: LlmProvider,
   chunk: Chunk,
   system: string,
   maxAttempts: number,
   limiter: RateLimiter,
-): Promise<{ html: string; ok: boolean; lastProblem?: string }> {
+  depth = 0,
+): Promise<ChunkResult> {
   let lastProblem: string | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const user = lastProblem
@@ -109,6 +117,11 @@ export async function translateChunk(
     await limiter.acquire();
     try {
       const res = await provider.complete({ system, user, maxTokens: estimateMaxTokens(chunk.html) });
+      // Reintentar lo mismo cuando se corta por tokens es tirar cuota: se parte en mitades.
+      if (res.truncated && depth < MAX_SPLIT_DEPTH) {
+        const split = await translateSplit(provider, chunk, system, maxAttempts, limiter, depth);
+        if (split) return split;
+      }
       const check = validateTranslation(chunk, res.text, res.truncated);
       if (check.ok) return { html: check.html, ok: true };
       lastProblem = check.problem;
@@ -118,6 +131,42 @@ export async function translateChunk(
     console.warn(`  intento ${attempt}/${maxAttempts} rechazado: ${lastProblem}`);
   }
   return { html: chunk.html, ok: false, lastProblem };
+}
+
+/**
+ * Re-chunkea un chunk a la mitad de su tamaño y traduce las partes en secuencia.
+ * Los placeholders del chunk original quedan como "keep" dentro de las partes, así
+ * que al restaurar vuelven intactos y el resultado se valida contra el chunk original.
+ * Devuelve null si el chunk no se puede partir (ej. un único párrafo enorme).
+ */
+async function translateSplit(
+  provider: LlmProvider,
+  chunk: Chunk,
+  system: string,
+  maxAttempts: number,
+  limiter: RateLimiter,
+  depth: number,
+): Promise<ChunkResult | null> {
+  if (chunk.html.length < MIN_SPLIT_CHARS * 2) return null;
+  const { chunks: parts, kept } = chunkHtml(chunk.html, Math.floor(chunk.html.length / 2));
+  const translatable = parts.filter((p) => !isPlaceholderOnly(p.html)).length;
+  if (translatable < 2) return null;
+
+  console.warn(`  respuesta cortada por tokens: el chunk se parte en ${translatable}`);
+  const out: string[] = [];
+  for (const part of parts) {
+    if (isPlaceholderOnly(part.html)) {
+      out.push(part.html);
+      continue;
+    }
+    const r = await translateChunk(provider, part, system, maxAttempts, limiter, depth + 1);
+    if (!r.ok) return { html: chunk.html, ok: false, lastProblem: r.lastProblem };
+    out.push(r.html);
+  }
+  const check = validateTranslation(chunk, restorePlaceholders(out.join(""), kept), false);
+  return check.ok
+    ? { html: check.html, ok: true }
+    : { html: chunk.html, ok: false, lastProblem: check.problem };
 }
 
 /** Traduce un documento HTML completo. */

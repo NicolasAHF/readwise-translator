@@ -36,7 +36,7 @@ export class ProviderError extends Error {
 export function createProvider(config: Config["provider"]): LlmProvider {
   return config.kind === "anthropic"
     ? new AnthropicProvider(config.apiKey, config.model)
-    : new OpenAICompatibleProvider(config.baseUrl, config.apiKey, config.model);
+    : new OpenAICompatibleProvider(config.baseUrl, config.apiKey, config.model, fetch, config.reasoningEffort);
 }
 
 export class AnthropicProvider implements LlmProvider {
@@ -66,6 +66,13 @@ interface ChatCompletionResponse {
   error?: { message?: string };
 }
 
+/**
+ * Tokens extra de salida cuando el modelo razona: en modelos como Gemini 3 el
+ * razonamiento sale del mismo max_tokens que la respuesta y no se puede apagar,
+ * así que sin este margen la traducción se corta. Es un techo, no un costo.
+ */
+export const REASONING_HEADROOM_TOKENS = 8_192;
+
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
   private static readonly MAX_RETRIES = 5;
@@ -75,11 +82,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
     private readonly apiKey: string,
     private readonly model: string,
     private readonly fetchImpl: typeof fetch = fetch,
+    /** "none" | "minimal" | "low" | "medium" | "high". Solo para modelos con razonamiento. */
+    private readonly reasoningEffort?: string,
   ) {
     this.name = `${new URL(baseUrl).host}/${model}`;
   }
 
-  async complete({ system, user, maxTokens }: CompletionRequest): Promise<CompletionResult> {
+  async complete({ system, user, maxTokens: baseMaxTokens }: CompletionRequest): Promise<CompletionResult> {
+    const maxTokens = this.reasoningEffort ? baseMaxTokens + REASONING_HEADROOM_TOKENS : baseMaxTokens;
     for (let attempt = 0; ; attempt++) {
       const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: "POST",
@@ -91,6 +101,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
           model: this.model,
           max_tokens: maxTokens,
           temperature: 0.2,
+          ...(this.reasoningEffort ? { reasoning_effort: this.reasoningEffort } : {}),
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },

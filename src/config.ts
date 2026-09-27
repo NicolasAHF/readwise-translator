@@ -19,7 +19,7 @@ export interface Config {
   originalAction: OriginalAction;
   provider:
     | { kind: "anthropic"; apiKey: string; model: string }
-    | { kind: "openai-compatible"; baseUrl: string; apiKey: string; model: string };
+    | { kind: "openai-compatible"; baseUrl: string; apiKey: string; model: string; reasoningEffort?: string };
 }
 
 type Env = Record<string, string | undefined>;
@@ -41,6 +41,7 @@ export function loadConfig(env: Env = process.env): Config {
             // Ollama local no necesita key; el resto sí.
             apiKey: env.LLM_API_KEY ?? "",
             model: required(env, "LLM_MODEL"),
+            ...(env.LLM_REASONING_EFFORT ? { reasoningEffort: parseReasoningEffort(env.LLM_REASONING_EFFORT) } : {}),
           }
         : fail(`PROVIDER inválido: "${kind}" (usá "openai-compatible" o "anthropic")`);
 
@@ -54,6 +55,13 @@ export function loadConfig(env: Env = process.env): Config {
     originalAction: parseOriginalAction(env.ORIGINAL_ACTION || "keep", "ORIGINAL_ACTION"),
     provider,
   };
+}
+
+const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"] as const;
+
+function parseReasoningEffort(value: string): string {
+  if ((REASONING_EFFORTS as readonly string[]).includes(value)) return value;
+  fail(`LLM_REASONING_EFFORT inválido: "${value}" (usá ${REASONING_EFFORTS.join(" | ")})`);
 }
 
 const ORIGINAL_ACTIONS: readonly OriginalAction[] = ["keep", "archive", "delete"];

@@ -52,6 +52,34 @@ describe("translateHtml", () => {
     expect(res.html).toBe(html);
   });
 
+  it("si el modelo corta por tokens, parte el chunk en vez de reintentar igual", async () => {
+    // Simula un modelo que se queda sin tokens con entradas de más de 1500 chars.
+    const provider = new FakeProvider((req) => {
+      const input = stripRetryNote(req.user);
+      return input.length > 1_500
+        ? { text: fakeTranslate(input).slice(0, 200), truncated: true }
+        : { text: fakeTranslate(input), truncated: false };
+    });
+    const html = `<div>${Array.from({ length: 12 }, (_, i) => `<p>Paragraph ${i}: the cache keeps the hot keys close to the service.</p><pre>code_${i}()</pre>`).join("")}${"<p>the end of the article with enough text to be long.</p>".repeat(20)}</div>`;
+    const res = await translateHtml(provider, html, { ...opts, chunkChars: 100_000, concurrency: 1 });
+
+    expect(res.failedChunks).toEqual([]);
+    expect(res.html).toBe(fakeTranslate(normalizeHtml(html)).replace(/el cache/g, "el caché"));
+    expect(res.html).toContain("<pre>code_11()</pre>");
+    // 1 llamada truncada + las partes; nunca reintenta la misma entrada truncada.
+    const inputs = provider.calls.map((c) => stripRetryNote(c.user));
+    expect(new Set(inputs).size).toBe(inputs.length);
+  });
+
+  it("un párrafo imposible de partir que se corta termina como fallido (sin loop)", async () => {
+    const provider = new FakeProvider(() => ({ text: "<p>cortado", truncated: true }));
+    const html = `<p>${"the word ".repeat(400)}</p>`;
+    const res = await translateHtml(provider, html, { ...opts, chunkChars: 100_000, maxAttempts: 2 });
+    expect(res.failedChunks).toEqual([0]);
+    expect(provider.calls).toHaveLength(2);
+    expect(res.html).toBe(html);
+  });
+
   it("sobrevive a errores de red del proveedor", async () => {
     const provider = new FakeProvider((req, i) => {
       if (i === 0) throw new Error("ECONNRESET");
