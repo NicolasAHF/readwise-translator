@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { docLabel, savedLabel } from "../src/output.js";
+import { docLabel, originalLabel, savedLabel } from "../src/output.js";
 import { SkipError, translateDocument } from "../src/pipeline.js";
 import type { ReaderDocument } from "../src/readwise.js";
 import { FakeProvider } from "./fixtures.js";
@@ -19,6 +19,14 @@ describe("--quiet no filtra qué estás leyendo", () => {
     expect(saved).not.toContain("https://");
   });
 
+  it("originalLabel describe la acción y el motivo", () => {
+    expect(originalLabel({ action: "deleted" })).toBe("original: borrado");
+    expect(originalLabel({ action: "archived", reason: "tiene highlights" })).toBe(
+      "original: archivado en vez de borrado (tiene highlights)",
+    );
+    expect(originalLabel(undefined)).toBe("original: sin cambios");
+  });
+
   it("en modo normal muestra título y URL", () => {
     expect(docLabel(doc, false)).toBe(SECRET_TITLE);
     expect(savedLabel(result, false)).toContain(SECRET_URL);
@@ -27,7 +35,13 @@ describe("--quiet no filtra qué estás leyendo", () => {
   it("los mensajes de SkipError no incluyen el título", async () => {
     const base = { id: "01abc", url: "https://x.com", source_url: null, title: SECRET_TITLE, author: null, category: "pdf",
       image_url: null, published_date: null, summary: null, parent_id: null, tags: null } satisfies ReaderDocument;
-    const reader = { saveDocument: async () => ({ id: "", url: "", alreadyExisted: false }), setTags: async () => {} };
+    const reader = {
+      saveDocument: async () => ({ id: "", url: "", alreadyExisted: false }),
+      updateDocument: async () => {},
+      deleteDocument: async () => {},
+      getDocument: async () => null,
+      hasHighlights: async () => false as const,
+    };
     const opts = { targetLang: "es", chunkChars: 1000, concurrency: 1, requestsPerMinute: 0 };
 
     for (const doc of [

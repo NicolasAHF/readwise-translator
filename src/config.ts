@@ -3,6 +3,8 @@
  * Fallar temprano con un mensaje claro es mejor que un 401 a mitad de un artículo.
  */
 
+import type { OriginalAction } from "./pipeline.js";
+
 export type ProviderKind = "openai-compatible" | "anthropic";
 
 export interface Config {
@@ -13,6 +15,8 @@ export interface Config {
   concurrency: number;
   /** Tope de requests por minuto al LLM (0 = sin tope). Clave para free tiers. */
   requestsPerMinute: number;
+  /** Qué hacer con el original tras traducir. */
+  originalAction: OriginalAction;
   provider:
     | { kind: "anthropic"; apiKey: string; model: string }
     | { kind: "openai-compatible"; baseUrl: string; apiKey: string; model: string };
@@ -47,8 +51,16 @@ export function loadConfig(env: Env = process.env): Config {
     chunkChars: positiveInt(env, "CHUNK_CHARS", 12_000),
     concurrency: positiveInt(env, "CONCURRENCY", 3),
     requestsPerMinute: positiveInt(env, "REQUESTS_PER_MINUTE", 0, true),
+    originalAction: parseOriginalAction(env.ORIGINAL_ACTION || "keep", "ORIGINAL_ACTION"),
     provider,
   };
+}
+
+const ORIGINAL_ACTIONS: readonly OriginalAction[] = ["keep", "archive", "delete"];
+
+export function parseOriginalAction(value: string, source: string): OriginalAction {
+  if ((ORIGINAL_ACTIONS as readonly string[]).includes(value)) return value as OriginalAction;
+  fail(`${source} inválido: "${value}" (usá ${ORIGINAL_ACTIONS.join(" | ")})`);
 }
 
 function required(env: Env, key: string): string {

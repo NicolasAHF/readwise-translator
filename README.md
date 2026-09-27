@@ -34,7 +34,30 @@ npm run translate -- --tag
 
 # Sin títulos ni URLs en la salida (para CI con logs públicos)
 npm run translate -- --tag --quiet
+
+# Borrar el original y quedarte solo con la traducción
+npm run translate -- 01k5... --original delete
 ```
+
+### ¿Qué pasa con el original?
+
+Cada traducción arranca con un bloque *"Traducción automática de [título original](url) — autor"*, así que siempre podés volver a la fuente. Con `ORIGINAL_ACTION` (o `--original`) elegís qué hacer con el original:
+
+| Valor | Efecto |
+|---|---|
+| `keep` (default) | Queda como estaba, solo se le saca el tag `translate`. |
+| `archive` | Pasa a *Archive*. |
+| `delete` | Se borra, pero **solo si es seguro**; si no, se archiva e imprime el motivo. |
+
+Borrar en Reader es irreversible y **se lleva los highlights y notas** del documento. Por eso `delete` solo borra si se cumple todo esto:
+
+1. La traducción está completa: ningún chunk quedó en el idioma original.
+2. El original tiene una URL web real. Los newsletters por email o los documentos subidos no tienen una, y el link quedaría roto.
+3. No tiene nota de documento.
+4. La traducción guardada se puede leer de vuelta desde la API.
+5. No tiene highlights. Se revisan los highlights creados desde que guardaste el artículo; si son demasiados para revisar, se asume que sí.
+
+Todo esto pasa **después** de guardar la traducción: si falla cualquier paso anterior, el original no se toca y conserva el tag para reintentarse en la próxima corrida.
 
 El modo `--tag` es el más cómodo: marcás artículos con `translate` desde el celular y el workflow de `.github/workflows/translate.yml` los procesa cada hora. Para eso agregá los secrets `READWISE_TOKEN` y `LLM_API_KEY` al repo.
 
@@ -69,7 +92,7 @@ Cualquier endpoint `/chat/completions` sirve: solo cambiás `LLM_BASE_URL` y `LL
 
 - **PDF/EPUB:** la API no expone su `html_content`, así que se saltean.
 - **Links a anclas internas:** el documento nuevo conserva los `href` originales.
-- **Highlights:** los del original no se migran; el documento traducido arranca limpio.
+- **Highlights:** los del original no se migran; el documento traducido arranca limpio. Por eso `delete` nunca borra un original con highlights.
 
 ## Desarrollo
 

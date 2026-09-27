@@ -36,9 +36,45 @@ describe("ReadwiseClient", () => {
 
   it("no reintenta 4xx y expone el body", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"detail":"bad"}', { status: 400 })));
-    const err = await new ReadwiseClient("tok").setTags("id", []).catch((e: unknown) => e);
+    const err = await new ReadwiseClient("tok").updateDocument("id", { tags: [] }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ReadwiseApiError);
     expect((err as ReadwiseApiError).body).toContain("bad");
+  });
+
+  it("deleteDocument manda DELETE y acepta 204 sin body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await new ReadwiseClient("tok").deleteDocument("abc");
+    expect(fetchMock.mock.calls[0]![0]).toBe("https://readwise.io/api/v3/delete/abc/");
+    expect(fetchMock.mock.calls[0]![1].method).toBe("DELETE");
+  });
+
+  describe("hasHighlights", () => {
+    const page = (results: object[], next: string | null) =>
+      new Response(JSON.stringify({ results, nextPageCursor: next }));
+    const doc = { id: "doc1", created_at: "2026-09-20T10:00:00Z" };
+
+    it("encuentra un highlight del documento en páginas posteriores", async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(page([{ parent_id: "otro" }], "c2"))
+        .mockResolvedValueOnce(page([{ parent_id: "doc1" }], null));
+      vi.stubGlobal("fetch", fetchMock);
+      expect(await new ReadwiseClient("tok").hasHighlights(doc)).toBe(true);
+      const firstUrl = new URL(fetchMock.mock.calls[0]![0]);
+      expect(firstUrl.searchParams.get("category")).toBe("highlight");
+      expect(firstUrl.searchParams.get("updatedAfter")).toBe(doc.created_at);
+      expect(new URL(fetchMock.mock.calls[1]![0]).searchParams.get("pageCursor")).toBe("c2");
+    });
+
+    it("false si recorrió todo sin encontrar", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(page([{ parent_id: "otro" }], null)));
+      expect(await new ReadwiseClient("tok").hasHighlights(doc)).toBe(false);
+    });
+
+    it("'unknown' si se queda sin páginas antes de terminar", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => page([{ parent_id: "otro" }], "más")));
+      expect(await new ReadwiseClient("tok").hasHighlights(doc, 3)).toBe("unknown");
+    });
   });
 });
 

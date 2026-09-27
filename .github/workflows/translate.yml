@@ -35,3 +35,6 @@ jobs:
           LLM_MODEL: gemini-flash-latest
           REQUESTS_PER_MINUTE: "8"
           TARGET_LANG: es
+          # Borra el original y deja un link a la fuente en la traducción.
+          # Si el original tiene highlights o nota (o algo no cierra), lo archiva en vez de borrarlo.
+          ORIGINAL_ACTION: delete

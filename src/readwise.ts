@@ -20,8 +20,21 @@ export interface ReaderDocument {
   parent_id: string | null;
   /** Objeto keyed por tag key: { "mi-tag": { name: "mi tag", ... } } */
   tags: Record<string, { name: string }> | null;
+  /** Nota a nivel documento. */
+  notes?: string | null;
+  created_at?: string;
   html_content?: string | null;
 }
+
+export type Location = "new" | "later" | "archive" | "feed";
+
+export interface UpdateDocumentInput {
+  tags?: string[];
+  location?: Location;
+}
+
+/** true/false si se pudo determinar; "unknown" si hay demasiados highlights recientes para revisar. */
+export type HighlightCheck = boolean | "unknown";
 
 export interface SaveDocumentInput {
   url: string;
@@ -90,9 +103,35 @@ export class ReadwiseClient {
     return { ...data, alreadyExisted: status === 200 };
   }
 
-  /** Reemplaza la lista completa de tags de un documento. */
-  async setTags(id: string, tags: string[]): Promise<void> {
-    await this.request("PATCH", `/update/${id}/`, { tags });
+  /** PATCH parcial: `tags` reemplaza la lista completa; `location` mueve el documento. */
+  async updateDocument(id: string, input: UpdateDocumentInput): Promise<void> {
+    await this.request("PATCH", `/update/${id}/`, input);
+  }
+
+  /** Borra el documento. OJO: Reader borra también sus highlights y notas. */
+  async deleteDocument(id: string): Promise<void> {
+    await this.request("DELETE", `/delete/${id}/`);
+  }
+
+  /**
+   * ¿El documento tiene highlights? La API no filtra por parent_id, así que se listan
+   * highlights actualizados después de que se guardó el documento (un highlight nunca
+   * es anterior a su documento) y se busca alguno que le pertenezca. Con un tope de
+   * páginas: si no alcanza para estar seguros, devuelve "unknown".
+   */
+  async hasHighlights(doc: Pick<ReaderDocument, "id" | "created_at">, maxPages = 5): Promise<HighlightCheck> {
+    let cursor: string | null = null;
+    for (let page = 0; page < maxPages; page++) {
+      const params = new URLSearchParams({ category: "highlight" });
+      if (doc.created_at) params.set("updatedAfter", doc.created_at);
+      if (cursor) params.set("pageCursor", cursor);
+      const res: { results: ReaderDocument[]; nextPageCursor: string | null } =
+        await this.request("GET", `/list/?${params}`);
+      if (res.results.some((h) => h.parent_id === doc.id)) return true;
+      cursor = res.nextPageCursor;
+      if (!cursor) return false;
+    }
+    return "unknown";
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {

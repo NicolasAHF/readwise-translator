@@ -7,13 +7,27 @@ import type { LlmProvider } from "./providers.js";
 import { tagNames, type ReaderDocument, type ReadwiseClient } from "./readwise.js";
 import { translateHtml, type TranslateOptions } from "./translator.js";
 
-export type ReaderPort = Pick<ReadwiseClient, "saveDocument" | "setTags">;
+export type ReaderPort = Pick<
+  ReadwiseClient,
+  "saveDocument" | "updateDocument" | "deleteDocument" | "getDocument" | "hasHighlights"
+>;
+
+/** Qué hacer con el documento original una vez guardada la traducción. */
+export type OriginalAction = "keep" | "archive" | "delete";
 
 export interface PipelineOptions extends Omit<TranslateOptions, "documentTitle" | "onProgress"> {
   /** Tag a quitar del original cuando termina bien (modo --tag). */
   triggerTag?: string;
+  /** Default "keep". "delete" cae a "archive" si borrar haría perder algo. */
+  originalAction?: OriginalAction;
   dryRun?: boolean;
   onProgress?: TranslateOptions["onProgress"];
+}
+
+export interface OriginalOutcome {
+  action: "kept" | "archived" | "deleted";
+  /** Por qué no se borró, cuando se pidió borrar. Nunca incluye el título. */
+  reason?: string;
 }
 
 export interface PipelineResult {
@@ -22,6 +36,7 @@ export interface PipelineResult {
   failedChunks: number;
   totalRequests: number;
   saved?: { id: string; url: string; alreadyExisted: boolean };
+  original?: OriginalOutcome;
 }
 
 export class SkipError extends Error {
@@ -54,7 +69,8 @@ export async function translateDocument(
 
   const result: PipelineResult = {
     title: meta.title,
-    html: body.html,
+    // El link al original va arriba y fuera de lo que ve el LLM (no se "traduce" ni se rompe).
+    html: sourceHeader(doc, lang) + body.html,
     failedChunks: body.failedChunks.length,
     totalRequests: body.translatedChunks + (meta.usedRequest ? 1 : 0),
   };
@@ -71,7 +87,7 @@ export async function translateDocument(
   const originalTags = tagNames(doc).filter((t) => t !== opts.triggerTag);
   result.saved = await reader.saveDocument({
     url: translatedUrl(doc, lang),
-    html: body.html,
+    html: result.html,
     title: meta.title,
     ...(meta.summary ? { summary: meta.summary } : {}),
     ...(doc.author ? { author: doc.author } : {}),
@@ -82,11 +98,91 @@ export async function translateDocument(
     saved_using: "readwise-translator",
   });
 
-  // Quitar el tag disparador solo después de guardar: si algo falla, el doc sigue en cola.
-  if (opts.triggerTag && tagNames(doc).includes(opts.triggerTag)) {
-    await reader.setTags(doc.id, originalTags);
-  }
+  // Todo lo que toca el original ocurre DESPUÉS de guardar: si algo falla antes,
+  // el original queda intacto (y con el tag, así se reintenta en la próxima corrida).
+  result.original = await handleOriginal(doc, reader, result, originalTags, opts);
   return result;
+}
+
+async function handleOriginal(
+  doc: ReaderDocument,
+  reader: ReaderPort,
+  result: PipelineResult,
+  originalTags: string[],
+  opts: PipelineOptions,
+): Promise<OriginalOutcome> {
+  const requested = opts.originalAction ?? "keep";
+  const hadTrigger = !!opts.triggerTag && tagNames(doc).includes(opts.triggerTag);
+
+  let reason: string | undefined;
+  if (requested === "delete") {
+    reason = (await deletionBlocker(doc, reader, result)) ?? undefined;
+    if (!reason) {
+      await reader.deleteDocument(doc.id);
+      return { action: "deleted" };
+    }
+  }
+
+  if (requested === "archive" || reason) {
+    await reader.updateDocument(doc.id, { tags: originalTags, location: "archive" });
+    return { action: "archived", ...(reason ? { reason } : {}) };
+  }
+
+  if (hadTrigger) await reader.updateDocument(doc.id, { tags: originalTags });
+  return { action: "kept" };
+}
+
+/**
+ * Devuelve el motivo por el que NO es seguro borrar el original, o null si lo es.
+ * Borrar en Reader es irreversible y se lleva highlights y notas, así que ante
+ * cualquier duda se archiva. Los checks van de más barato a más caro (requests).
+ */
+export async function deletionBlocker(
+  doc: ReaderDocument,
+  reader: Pick<ReaderPort, "getDocument" | "hasHighlights">,
+  result: Pick<PipelineResult, "failedChunks" | "saved">,
+): Promise<string | null> {
+  if (result.failedChunks > 0) return "la traducción quedó incompleta";
+  if (!isWebUrl(doc.source_url)) return "no tiene URL web de origen (el link no llevaría a ningún lado)";
+  if (doc.notes?.trim()) return "tiene una nota";
+  if (!result.saved || !(await reader.getDocument(result.saved.id))) return "no pude verificar la traducción guardada";
+  const highlights = await reader.hasHighlights(doc);
+  if (highlights === true) return "tiene highlights";
+  if (highlights === "unknown") return "no pude descartar que tenga highlights";
+  return null;
+}
+
+/** URL pública http(s) que no sea de Readwise (esas mueren al borrar el documento). */
+export function isWebUrl(url: string | null | undefined): url is string {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return (u.protocol === "https:" || u.protocol === "http:") && !/(^|\.)readwise\.io$/.test(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+const HEADER_LABELS: Record<string, string> = {
+  es: "Traducción automática de",
+  en: "Machine translation of",
+  pt: "Tradução automática de",
+  fr: "Traduction automatique de",
+  it: "Traduzione automatica di",
+  de: "Maschinelle Übersetzung von",
+};
+
+/** Bloque con el link al original, en el idioma destino. */
+export function sourceHeader(
+  doc: Pick<ReaderDocument, "source_url" | "url" | "title" | "author">,
+  lang: string,
+): string {
+  const label = HEADER_LABELS[lang.split("-")[0]!.toLowerCase()] ?? HEADER_LABELS.en!;
+  // new URL() normaliza y percent-encodea (< > " en la query) antes de escapar para HTML.
+  const href = isWebUrl(doc.source_url) ? new URL(doc.source_url).toString() : doc.url;
+  const title = escapeHtml(doc.title?.trim() || href);
+  const author = doc.author ? ` — ${escapeHtml(doc.author)}` : "";
+  return `<blockquote><p><em>${label}</em> <a href="${escapeHtml(href)}">${title}</a>${author}</p></blockquote><hr>`;
 }
 
 /**
