@@ -17,9 +17,9 @@
     "node-html-parser": "^9.0.4"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.6.2",
     "tsx": "^4.20.0",
-    "typescript": "^6.0.0",
+    "typescript": "^7.0.2",
     "vitest": "^5.0.0"
   }
 }
