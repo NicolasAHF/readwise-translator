@@ -19,6 +19,12 @@ export interface CompletionResult {
   text: string;
   /** El modelo cortó por límite de tokens: la salida está incompleta. */
   truncated: boolean;
+  /**
+   * Motivo de corte tal como lo reporta el proveedor ("stop", "content_filter", "refusal"…).
+   * Solo para diagnóstico: una salida vacía por un filtro de contenido no se distingue
+   * de otra cosa sin esto.
+   */
+  finishReason?: string;
 }
 
 export interface LlmProvider {
@@ -71,7 +77,11 @@ export class AnthropicProvider implements LlmProvider {
       messages: [{ role: "user", content: user }],
     });
     const text = msg.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
-    return { text, truncated: msg.stop_reason === "max_tokens" };
+    return {
+      text,
+      truncated: msg.stop_reason === "max_tokens",
+      ...(msg.stop_reason ? { finishReason: msg.stop_reason } : {}),
+    };
   }
 }
 
@@ -146,9 +156,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
       const body = (text ? JSON.parse(text) : {}) as ChatCompletionResponse;
       const choice = body.choices?.[0];
+      // Sin choices: algunos proveedores (Gemini) bloquean así la respuesta entera.
+      const finishReason = choice ? choice.finish_reason : "no_choices";
       return {
         text: choice?.message?.content ?? "",
         truncated: choice?.finish_reason === "length",
+        ...(finishReason ? { finishReason } : {}),
       };
     }
   }

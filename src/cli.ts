@@ -9,7 +9,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { loadConfig, parseOriginalAction } from "./config.js";
-import { IncompleteTranslationError, SkipError, translateDocument } from "./pipeline.js";
+import { IncompleteTranslationError, SkipError, translateDocument, UnreadableSourceError } from "./pipeline.js";
 import { createProvider, QuotaExhaustedError } from "./providers.js";
 import { parseDocumentId, ReadwiseClient, type ReaderDocument } from "./readwise.js";
 import { estimateRequests } from "./translator.js";
@@ -110,7 +110,11 @@ async function main(): Promise<number> {
       summary.translated++;
     } catch (err) {
       if (!quiet) process.stdout.write("\n");
-      if (err instanceof SkipError) {
+      if (err instanceof UnreadableSourceError) {
+        // Salteado, pero con aviso visible en el run: hay algo que hacer a mano (OCR).
+        summary.skipped++;
+        warn(`${docLabel(doc, true)}: ${err.message}`);
+      } else if (err instanceof SkipError) {
         summary.skipped++;
         console.log(`  ↷ salteado: ${err.message}\n`);
       } else if (err instanceof IncompleteTranslationError) {

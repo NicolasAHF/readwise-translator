@@ -3,9 +3,10 @@
  *
  * Los LLMs (sobre todo los chicos/gratuitos) a veces: envuelven la salida en ```html,
  * se comen tags, traducen código, o cortan por límite de tokens. Cada respuesta pasa
- * por `validateTranslation`; si falla, se reintenta contándole al modelo qué salió mal.
- * Si se agotan los intentos, el chunk queda en el idioma original (el documento se
- * guarda igual y el resumen final avisa cuántos chunks fallaron).
+ * por `validateTranslation`; si falla, se reintenta contándole al modelo qué salió mal,
+ * y si vuelve a fallar se parte el chunk en mitades (menos tags por request = menos
+ * para romper). Si se agotan los intentos, el chunk queda en el idioma original y el
+ * pipeline no guarda el artículo (todo o nada).
  */
 import {
   chunkHtml,
@@ -14,6 +15,7 @@ import {
   restorePlaceholders,
   visibleText,
   type Chunk,
+  type ChunkedDocument,
 } from "./html-chunker.js";
 import { QuotaExhaustedError, type LlmProvider } from "./providers.js";
 
@@ -70,11 +72,20 @@ export interface ValidationResult {
 }
 
 /** Checks baratos que detectan las fallas típicas sin necesitar otro LLM. */
-export function validateTranslation(source: Chunk, raw: string, truncated: boolean): ValidationResult {
+export function validateTranslation(
+  source: Chunk,
+  raw: string,
+  truncated: boolean,
+  /** Solo para el mensaje: un vacío por "content_filter" no se arregla igual que uno por "stop". */
+  finishReason?: string,
+): ValidationResult {
   if (truncated) return { ok: false, html: raw, problem: "the output was cut off by the token limit" };
 
   const html = stripCodeFences(raw).trim();
-  if (!html) return { ok: false, html, problem: "the output was empty" };
+  if (!html) {
+    const why = finishReason ? ` (finish_reason: ${finishReason})` : "";
+    return { ok: false, html, problem: `the output was empty${why}` };
+  }
 
   // Mismo conjunto Y mismo orden: los placeholders incluyen tags de apertura/cierre de
   // contenedores, así que un reordenamiento rompe el anidamiento del HTML.
@@ -110,6 +121,12 @@ export function validateTranslation(source: Chunk, raw: string, truncated: boole
 const MAX_SPLIT_DEPTH = 3;
 /** Por debajo de este tamaño no se parte más: se reintenta normal. */
 const MIN_SPLIT_CHARS = 1_000;
+/**
+ * Respuestas inválidas (HTML roto, placeholders perdidos, vacías) tras las cuales se
+ * parte el chunk en vez de seguir reintentándolo entero: si el modelo rompió dos veces
+ * la misma entrada, la tercera suele fallar igual (fórmulas, texto de PDF fragmentado).
+ */
+const SPLIT_AFTER_INVALID = 2;
 
 export interface ChunkResult {
   html: string;
@@ -159,6 +176,7 @@ export async function translateChunk(
 ): Promise<ChunkResult> {
   let lastProblem: string | undefined;
   let transient = false;
+  let invalid = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const user = lastProblem
       ? `${chunk.html}\n\n<!-- Your previous attempt was rejected because ${lastProblem}. Follow the rules strictly. -->`
@@ -167,51 +185,68 @@ export async function translateChunk(
     try {
       const res = await provider.complete({ system, user, maxTokens: estimateMaxTokens(chunk.html) });
       // Reintentar lo mismo cuando se corta por tokens es tirar cuota: se parte en mitades.
-      if (res.truncated && depth < MAX_SPLIT_DEPTH) {
-        const split = await translateSplit(provider, chunk, system, maxAttempts, limiter, depth, stats);
-        if (split) return split;
+      const parts = res.truncated && depth < MAX_SPLIT_DEPTH ? splitChunk(chunk) : null;
+      if (parts) {
+        console.warn(`  respuesta cortada por tokens: el chunk se parte en ${parts.chunks.length}`);
+        return translateParts(provider, chunk, parts, system, maxAttempts, limiter, depth, stats);
       }
-      const check = validateTranslation(chunk, res.text, res.truncated);
+      const check = validateTranslation(chunk, res.text, res.truncated, res.finishReason);
       if (check.ok) return { html: check.html, ok: true };
       lastProblem = check.problem;
       transient = false;
+      invalid++;
     } catch (err) {
       // Sin cuota no tiene sentido seguir con este ni con ningún otro chunk.
       if (err instanceof QuotaExhaustedError) throw err;
       lastProblem = `a request error occurred (${(err as Error).message})`;
       transient = true;
     }
+    // Las fallas de red no se arreglan partiendo: solo cuentan las respuestas inválidas.
+    const parts =
+      !transient && invalid >= SPLIT_AFTER_INVALID && attempt < maxAttempts && depth < MAX_SPLIT_DEPTH
+        ? splitChunk(chunk)
+        : null;
     // "chunk" y no "intento" a secas: estos reintentos son dentro de la corrida y no
     // tienen nada que ver con los intentos del artículo (translate-attempt-N).
-    const next = attempt < maxAttempts ? "se reintenta" : "se da por fallido";
+    const next = parts
+      ? `se parte en ${parts.chunks.length}`
+      : attempt < maxAttempts
+        ? "se reintenta"
+        : "se da por fallido";
     stats.rejected++;
     console.warn(`  chunk rechazado (${attempt}/${maxAttempts}, ${next}): ${lastProblem}`);
+    if (parts) return translateParts(provider, chunk, parts, system, maxAttempts, limiter, depth, stats);
   }
   return { html: chunk.html, ok: false, lastProblem, transient };
 }
 
 /**
- * Re-chunkea un chunk a la mitad de su tamaño y traduce las partes en secuencia.
+ * Re-chunkea un chunk a la mitad de su tamaño. Devuelve null si no se puede partir
+ * (es chico, o es un único párrafo enorme).
+ */
+function splitChunk(chunk: Chunk): ChunkedDocument | null {
+  if (chunk.html.length < MIN_SPLIT_CHARS * 2) return null;
+  const split = chunkHtml(chunk.html, Math.floor(chunk.html.length / 2));
+  // chunkHtml nunca produce una parte sin texto si el chunk tiene texto (los "keep" se
+  // pegan al chunk en curso), así que todas las partes van al modelo.
+  return split.chunks.length < 2 ? null : split;
+}
+
+/**
+ * Traduce en secuencia las partes de un chunk partido con `splitChunk`.
  * Los placeholders del chunk original quedan como "keep" dentro de las partes, así
  * que al restaurar vuelven intactos y el resultado se valida contra el chunk original.
- * Devuelve null si el chunk no se puede partir (ej. un único párrafo enorme).
  */
-async function translateSplit(
+async function translateParts(
   provider: LlmProvider,
   chunk: Chunk,
+  { chunks: parts, kept }: ChunkedDocument,
   system: string,
   maxAttempts: number,
   limiter: RateLimiter,
   depth: number,
   stats: { rejected: number },
-): Promise<ChunkResult | null> {
-  if (chunk.html.length < MIN_SPLIT_CHARS * 2) return null;
-  const { chunks: parts, kept } = chunkHtml(chunk.html, Math.floor(chunk.html.length / 2));
-  // chunkHtml nunca produce una parte sin texto si el chunk tiene texto (los "keep" se
-  // pegan al chunk en curso), así que todas las partes van al modelo.
-  if (parts.length < 2) return null;
-
-  console.warn(`  respuesta cortada por tokens: el chunk se parte en ${parts.length}`);
+): Promise<ChunkResult> {
   const out: string[] = [];
   for (const part of parts) {
     const r = await translateChunk(provider, part, system, maxAttempts, limiter, depth + 1, stats);

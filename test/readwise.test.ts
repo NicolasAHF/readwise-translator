@@ -159,7 +159,7 @@ describe("OpenAICompatibleProvider", () => {
     const p = new OpenAICompatibleProvider("https://api.groq.com/openai/v1", "k", "llama", fetchMock);
     const res = await p.complete({ system: "s", user: "<p>hi</p>", maxTokens: 100 });
 
-    expect(res).toEqual({ text: "<p>hola</p>", truncated: true });
+    expect(res).toEqual({ text: "<p>hola</p>", truncated: true, finishReason: "length" });
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("https://api.groq.com/openai/v1/chat/completions");
     expect(JSON.parse(init.body)).toMatchObject({ model: "llama", max_tokens: 100, messages: [{ role: "system" }, { role: "user" }] });
