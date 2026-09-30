@@ -25,7 +25,7 @@ describe("AnthropicProvider", () => {
     const p = new AnthropicProvider("key", "claude-sonnet-5", client);
     const res = await p.complete({ system: "sys", user: "<p>hi</p>", maxTokens: 1_234 });
 
-    expect(res).toEqual({ text: "<p>hola mundo</p>", truncated: false });
+    expect(res).toEqual({ text: "<p>hola mundo</p>", truncated: false, finishReason: "end_turn" });
     expect(create).toHaveBeenCalledWith({
       model: "claude-sonnet-5",
       max_tokens: 1_234,
@@ -39,6 +39,18 @@ describe("AnthropicProvider", () => {
     const { client } = fakeClient({ content: [{ type: "text", text: "<p>cor" }], stop_reason: "max_tokens" });
     const res = await new AnthropicProvider("k", "m", client).complete({ system: "", user: "", maxTokens: 1 });
     expect(res.truncated).toBe(true);
+  });
+
+  it("una negativa del modelo (stop_reason refusal) llega como finishReason", async () => {
+    const { client } = fakeClient({ content: [], stop_reason: "refusal" });
+    const res = await new AnthropicProvider("k", "m", client).complete({ system: "", user: "", maxTokens: 1 });
+    expect(res).toEqual({ text: "", truncated: false, finishReason: "refusal" });
+  });
+
+  it("sin stop_reason no inventa uno", async () => {
+    const { client } = fakeClient({ content: [{ type: "text", text: "ok" }], stop_reason: null });
+    const res = await new AnthropicProvider("k", "m", client).complete({ system: "", user: "", maxTokens: 1 });
+    expect(res).toEqual({ text: "ok", truncated: false });
   });
 });
 
@@ -106,7 +118,22 @@ describe("OpenAICompatibleProvider: errores y reintentos", () => {
   it("respuesta sin choices → texto vacío (lo rechaza la validación, no explota)", async () => {
     const fetchMock = vi.fn(async () => new Response("{}"));
     const res = await new OpenAICompatibleProvider("https://g.example/v1", "k", "m", fetchMock).complete({ system: "", user: "", maxTokens: 1 });
-    expect(res).toEqual({ text: "", truncated: false });
+    // Gemini bloquea así algunas respuestas: el motivo tiene que llegar al log.
+    expect(res).toEqual({ text: "", truncated: false, finishReason: "no_choices" });
+  });
+
+  it("un vacío por filtro de contenido llega con su finish_reason", async () => {
+    const body = { choices: [{ message: { content: null }, finish_reason: "content_filter" }] };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body)));
+    const res = await new OpenAICompatibleProvider("https://g.example/v1", "k", "m", fetchMock).complete({ system: "", user: "", maxTokens: 1 });
+    expect(res).toEqual({ text: "", truncated: false, finishReason: "content_filter" });
+  });
+
+  it("choice sin finish_reason → sin finishReason", async () => {
+    const body = { choices: [{ message: { content: "hola" } }] };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body)));
+    const res = await new OpenAICompatibleProvider("https://g.example/v1", "k", "m", fetchMock).complete({ system: "", user: "", maxTokens: 1 });
+    expect(res).toEqual({ text: "hola", truncated: false });
   });
 
   it("finish_reason stop → no truncado", async () => {

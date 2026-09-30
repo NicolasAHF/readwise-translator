@@ -68,6 +68,7 @@ Cada artículo es **todo o nada**. Si queda aunque sea un chunk sin traducir, no
 | Falla pasajera (red, 5xx, 429 por minuto que no se resolvió) | Conserva el tag, sin gastar intentos | ✅ verde con aviso |
 | El modelo devuelve algo inválido (HTML roto, placeholders cambiados) | Suma un intento con el tag `translate-attempt-N` | ✅ verde con aviso |
 | 3 intentos inválidos | Pierde `translate` y gana `translate-failed`: no se reintenta más. Para volver a intentarlo, le ponés `translate` de nuevo en Reader | ✅ verde con aviso |
+| El texto ya viene roto de origen (PDF sin mapeo a Unicode, ver abajo) | Pasa directo a `translate-failed`, sin gastar cuota | ✅ verde con aviso |
 | Cuota diaria del LLM agotada | La corrida se corta; lo pendiente conserva el tag | ✅ verde con aviso |
 | Error real (Readwise caído, config inválida) | Sin cambios | ❌ falla |
 
@@ -101,13 +102,21 @@ Cualquier endpoint `/chat/completions` sirve: solo cambiás `LLM_BASE_URL` y `LL
 - **Chunking estructural, no por caracteres.** El HTML se aplana en segmentos que, concatenados, reproducen el original. Los contenedores grandes se abren y sus tags de apertura y cierre se preservan tal cual, así un chunk nunca corta una oración a la mitad.
 - **Placeholders para lo que no se traduce.** `<pre>`, `<svg>`, `<script>`, etc. se reemplazan por `<rw-keep id="N">`. El modelo no ve el código, así que no lo puede "traducir", y los chunks se empaquetan con más prosa, lo que importa con free tiers de pocas requests por día.
 - **Respuestas cortadas por tokens.** Si el modelo se queda sin tokens (típico en modelos que razonan, como Gemini 3), el chunk no se reintenta igual: se parte a la mitad y se traducen las partes, hasta 3 niveles. Además, con `LLM_REASONING_EFFORT` se suma margen de tokens para el razonamiento.
-- **Validación sin segundo LLM.** Cada respuesta se valida: saca fences de markdown, controla que estén exactamente los mismos placeholders, que la cantidad de tags no varíe más de un 10% y que la longitud del texto sea plausible. Si falla, reintenta (3 veces por defecto) diciéndole al modelo qué estuvo mal. Si igual falla, ese chunk queda en el idioma original y el resumen lo avisa. Si fallan más de la mitad, no se guarda.
+- **Validación sin segundo LLM.** Cada respuesta se valida: saca fences de markdown, controla que estén exactamente los mismos placeholders, que la cantidad de tags no varíe más de un 10% y que la longitud del texto sea plausible. Si falla, reintenta diciéndole al modelo qué estuvo mal. Si una salida vacía vino con un `finish_reason` (ej. `content_filter`), el log lo muestra.
+- **Chunks que el modelo rompe dos veces se parten.** Si dos respuestas seguidas son inválidas, el tercer intento se reemplaza por las dos mitades del chunk (hasta 3 niveles, igual que con los cortes por tokens). Con fórmulas o tablas, menos tags por request es lo que más ayuda. Si igual falla, el artículo no se guarda (todo o nada).
 - **Idempotente.** La URL del documento nuevo es `<source_url>#readwise-translation-<lang>`, y Reader responde 200 sin duplicar si ya existe. El tag disparador se saca *después* de guardar: si algo falla, el documento sigue en la cola.
 - **Rate limits.** Hay reintentos con `Retry-After` en Readwise y en el LLM, más un limitador de RPM opcional (`REQUESTS_PER_MINUTE`).
 
 ## Limitaciones
 
 - **PDF/EPUB:** la API no expone su `html_content`, así que se saltean.
+- **PDFs con la capa de texto rota:** papers viejos de LaTeX (dvips con fuentes Type 3) no tienen mapeo a Unicode: al extraer el texto, dígitos, puntuación y ligaduras salen como caracteres de control, con un código distinto por fuente (`Ha\x04ner`, `NOVEMBER \x01\t\t\x08`). No se puede reparar sin OCR. Si el texto tiene más de 0,5% de caracteres de control, el documento pasa directo a `translate-failed` sin gastar cuota. Para traducirlo, pasale OCR y subí ese PDF:
+
+  ```bash
+  pip install ocrmypdf   # necesita tesseract (apt install tesseract-ocr); pngquant y jbig2 achican el resultado
+  ocrmypdf --force-ocr --optimize 3 paper.pdf paper-ocr.pdf
+  ```
+- **Fórmulas:** una ecuación extraída de un PDF es una sopa de `<sub>`, `<sup>` y letras sueltas. El modelo tiende a "limpiarlas" y la validación lo rechaza. Partir los chunks lo resuelve casi siempre; con un modelo más chico (ej. `gemini-flash-lite-latest`) falla más seguido.
 - **Links a anclas internas:** el documento nuevo conserva los `href` originales.
 - **Highlights:** los del original no se migran; el documento traducido arranca limpio. Por eso `delete` nunca borra un original con highlights.
 

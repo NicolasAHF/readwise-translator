@@ -5,6 +5,7 @@
 import { parse } from "node-html-parser";
 import type { LlmProvider } from "./providers.js";
 import { tagNames, type ReaderDocument, type ReadwiseClient } from "./readwise.js";
+import { unreadableTextReason } from "./text-quality.js";
 import { translateHtml, type TranslateOptions } from "./translator.js";
 
 export type ReaderPort = Pick<
@@ -47,6 +48,21 @@ export class SkipError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SkipError";
+  }
+}
+
+/**
+ * El texto del original ya viene roto (ej. PDF sin mapeo a Unicode): ningún modelo lo
+ * va a traducir bien, así que ni se intenta. En modo --tag se marca como fallido de
+ * entrada, sin gastar cuota ni intentos. Es un aviso, no un error del programa.
+ */
+export class UnreadableSourceError extends SkipError {
+  constructor(reason: string, readonly markedFailed?: string) {
+    super(
+      `${reason}. No se traduce: pasale OCR al PDF (ej. \`ocrmypdf --force-ocr in.pdf out.pdf\`) y subí el resultado a Reader` +
+        (markedFailed ? `; se marcó ${markedFailed}` : ""),
+    );
+    this.name = "UnreadableSourceError";
   }
 }
 
@@ -107,6 +123,10 @@ export async function translateDocument(
   }
   if (tagNames(doc).includes(translationTag(lang))) {
     throw new SkipError("ya es una traducción");
+  }
+  const unreadable = unreadableTextReason(doc.html_content);
+  if (unreadable) {
+    throw new UnreadableSourceError(unreadable, opts.dryRun ? undefined : await markUnreadable(doc, reader, opts));
   }
 
   const body = await translateHtml(provider, doc.html_content, {
@@ -187,6 +207,18 @@ async function recordFailedAttempt(
   }
   await reader.updateDocument(doc.id, { tags: [...rest, trigger, attemptTag(trigger, attempt)] });
   return { ...base, attempt, gaveUp: false };
+}
+
+/** En modo --tag, reintentar no cambia nada: pasa directo a translate-failed. */
+async function markUnreadable(
+  doc: ReaderDocument,
+  reader: Pick<ReaderPort, "updateDocument">,
+  opts: PipelineOptions,
+): Promise<string | undefined> {
+  const trigger = opts.triggerTag;
+  if (!trigger || !tagNames(doc).includes(trigger)) return undefined;
+  await reader.updateDocument(doc.id, { tags: [...cleanTags(doc, trigger), failedTag(trigger)] });
+  return failedTag(trigger);
 }
 
 async function handleOriginal(

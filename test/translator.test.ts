@@ -136,6 +136,12 @@ describe("validateTranslation", () => {
     expect(validateTranslation(src, "  \n\t ", false)).toMatchObject({ ok: false, problem: expect.stringContaining("empty") });
   });
 
+  it("un vacío dice por qué cortó el proveedor (ej. filtro de contenido)", () => {
+    const src = { html: "<p>x</p>", placeholderIds: [] };
+    expect(validateTranslation(src, "", false, "content_filter").problem).toBe("the output was empty (finish_reason: content_filter)");
+    expect(validateTranslation(src, "", false).problem).toBe("the output was empty");
+  });
+
   describe("placeholders", () => {
     const src = { html: '<rw-keep id="3"></rw-keep><p>the text</p><rw-keep id="7"></rw-keep>', placeholderIds: [3, 7] };
 
@@ -469,5 +475,94 @@ describe("rejectedResponses", () => {
   it("cero cuando todo sale al primer intento", async () => {
     const res = await translateHtml(new FakeProvider(), ARTICLE, opts);
     expect(res.rejectedResponses).toBe(0);
+  });
+});
+
+describe("partir chunks que el modelo rompe dos veces", () => {
+  /** n párrafos de exactamente `size` chars cada uno. */
+  const paragraphs = (n: number, size: number) => `<p>${"a".repeat(size - 7)}</p>`.repeat(n);
+  const big = { ...opts, chunkChars: 100_000, concurrency: 1 };
+  const inputs = (p: FakeProvider) => p.calls.map((c) => stripRetryNote(c.user).length);
+
+  it("tras 2 respuestas inválidas parte el chunk y traduce las mitades", async () => {
+    // Un modelo que con entradas grandes "limpia" las fórmulas y se come los <sub>.
+    const formula = "<p>the loss of x<sub>i</sub> over the mini-batch of size m is averaged here.</p>";
+    const html = `<div>${formula.repeat(40)}</div>`;
+    const provider = new FakeProvider((req) => {
+      const input = stripRetryNote(req.user);
+      const out = fakeTranslate(input);
+      return { text: input.length > 2_000 ? out.replace(/<\/?sub>/g, "") : out, truncated: false };
+    });
+    const res = await translateHtml(provider, html, big);
+
+    expect(res.failedChunks).toEqual([]);
+    expect(res.html).toBe(fakeTranslate(normalizeHtml(html)));
+    // 2 intentos con el chunk entero; el tercero se reemplaza por las mitades.
+    const [first, second, ...rest] = inputs(provider);
+    expect(second).toBe(first);
+    expect(rest.length).toBeGreaterThanOrEqual(2);
+    expect(rest.every((n) => n < first!)).toBe(true);
+    expect(res.rejectedResponses).toBe(2);
+  });
+
+  it("también parte cuando el modelo devuelve vacío dos veces (ej. filtro de contenido)", async () => {
+    const provider = new FakeProvider((req) => {
+      const input = stripRetryNote(req.user);
+      return input.length > 1_500 ? { text: "", truncated: false, finishReason: "content_filter" } : { text: input, truncated: false };
+    });
+    const res = await translateHtml(provider, paragraphs(8, 250), big);
+    expect(res.failedChunks).toEqual([]);
+    expect(inputs(provider)).toEqual([2_000, 2_000, 1_000, 1_000]);
+    expect(provider.calls[1]?.user).toContain("finish_reason: content_filter");
+  });
+
+  it("un chunk chico (< 2000 chars) no se parte: usa los 3 intentos", async () => {
+    const provider = new FakeProvider(() => ({ text: "", truncated: false }));
+    const res = await translateHtml(provider, paragraphs(2, 999), big);
+    expect(inputs(provider)).toEqual([1_998, 1_998, 1_998]);
+    expect(res.failedChunks).toEqual([0]);
+  });
+
+  it("las fallas de red no cuentan: una inválida + una de red → tercer intento entero", async () => {
+    const provider = new FakeProvider((req, i) => {
+      if (i === 1) throw new Error("ECONNRESET");
+      return { text: "", truncated: false };
+    });
+    await translateHtml(provider, paragraphs(8, 250), big);
+    expect(inputs(provider)).toEqual([2_000, 2_000, 2_000]);
+  });
+
+  it("con maxAttempts 2 no hay tercer intento que reemplazar: no se parte", async () => {
+    const provider = new FakeProvider(() => ({ text: "", truncated: false }));
+    await translateHtml(provider, paragraphs(8, 250), { ...big, maxAttempts: 2 });
+    expect(inputs(provider)).toEqual([2_000, 2_000]);
+  });
+
+  it("respeta la profundidad máxima y al fallar una parte no sigue con las demás", async () => {
+    const provider = new FakeProvider(() => ({ text: "", truncated: false }));
+    const res = await translateHtml(provider, paragraphs(80, 250), big);
+    // 2 intentos por nivel (0..2) y en el nivel 3 ya no se parte: 3 intentos y se rinde.
+    expect(inputs(provider)).toEqual([20_000, 20_000, 10_000, 10_000, 5_000, 5_000, 2_500, 2_500, 2_500]);
+    expect(res.failedChunks).toEqual([0]);
+    expect(res.onlyTransientFailures).toBe(false);
+    expect(res.html).toBe(paragraphs(80, 250));
+  });
+
+  it("el log dice que el chunk se parte en vez de 'se reintenta'", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const provider = new FakeProvider((req) => {
+        const input = stripRetryNote(req.user);
+        return { text: input.length > 1_500 ? "" : input, truncated: false };
+      });
+      await translateHtml(provider, paragraphs(8, 250), big);
+      const logged = warn.mock.calls.map((c) => String(c[0]));
+      expect(logged).toEqual([
+        "  chunk rechazado (1/3, se reintenta): the output was empty",
+        "  chunk rechazado (2/3, se parte en 2): the output was empty",
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

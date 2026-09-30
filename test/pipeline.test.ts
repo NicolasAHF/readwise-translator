@@ -8,6 +8,7 @@ import {
   sourceHeader,
   translateDocument,
   translatedUrl,
+  UnreadableSourceError,
   type ReaderPort,
 } from "../src/pipeline.js";
 import type { HighlightCheck, ReaderDocument, SaveDocumentInput, UpdateDocumentInput } from "../src/readwise.js";
@@ -127,6 +128,35 @@ describe("translateDocument — guardado", () => {
   it("saltea documentos que ya son traducciones (evita loops en modo --tag)", async () => {
     const doc = { ...baseDoc, tags: { "translation-es": { name: "translation-es" } } };
     await expect(translateDocument(doc, fakeReader(), new FakeProvider(), opts)).rejects.toBeInstanceOf(SkipError);
+  });
+
+  describe("texto roto de origen (PDF sin mapeo a Unicode)", () => {
+    const broken = `<p>${"PR OC\u0002 OF THE IEEE\u0003 NO VEMBER \u0001\t\t\u0008 Ha\u0004ner ".repeat(20)}</p>`;
+    const brokenDoc = { ...baseDoc, html_content: broken };
+
+    it("no llama al modelo y en modo --tag lo marca translate-failed de entrada", async () => {
+      const reader = fakeReader();
+      const provider = new FakeProvider();
+      const err = await translateDocument(brokenDoc, reader, provider, opts).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(UnreadableSourceError);
+      expect(err).toBeInstanceOf(SkipError);
+      expect((err as Error).message).toMatch(/caracteres de control.*ocrmypdf --force-ocr.*se marcó translate-failed$/);
+      expect(provider.calls).toHaveLength(0);
+      expect(reader.saveDocument).not.toHaveBeenCalled();
+      expect(reader.deleteDocument).not.toHaveBeenCalled();
+      expect(reader.updateDocument).toHaveBeenCalledExactlyOnceWith(baseDoc.id, { tags: ["system-design", "translate-failed"] });
+    });
+
+    it("sin modo --tag o en dry-run no toca los tags", async () => {
+      for (const extra of [{ triggerTag: undefined }, { dryRun: true }]) {
+        const reader = fakeReader();
+        const err = await translateDocument(brokenDoc, reader, new FakeProvider(), { ...opts, ...extra }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(UnreadableSourceError);
+        expect((err as Error).message).not.toContain("se marcó");
+        expect(reader.updateDocument).not.toHaveBeenCalled();
+      }
+    });
   });
 
   describe("todo o nada: una traducción incompleta no se guarda", () => {
