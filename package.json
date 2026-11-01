@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
-    "node-html-parser": "^9.0.4"
+    "node-html-parser": "^9.0.5"
   },
   "devDependencies": {
     "@stryker-mutator/core": "^10.0.0",
